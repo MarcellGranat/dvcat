@@ -885,11 +885,16 @@ mod tests {
     fn not_started_message_is_visible_in_the_log() {
         let mut app = demo_app();
         let mut run = Run::new("train".into(), false);
-        run.log.push_str("dvc not found. Looked in: here; there");
+        run.log
+            .push_str("dvc not found. Looked in:\n  here\n  there");
         run.log.finish();
         run.phase = RunPhase::Finished(RunOutcome::NotStarted("x".into()));
         app.run = Some(run);
-        assert!(screen(&app).contains("Looked in: here; there"));
+        let text = screen(&app);
+        assert!(
+            text.contains("Looked in:") && text.contains("  here") && text.contains("  there"),
+            "{text}"
+        );
     }
 
     #[test]

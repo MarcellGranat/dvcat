@@ -57,9 +57,9 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 
 ## 9. Integration and wrap-up
 
-- [ ] 9.1 End-to-end manual pass on the fixture: browse, see stale, run `R` on `train`, see statuses turn green, open experiments and sort by a metric; verify every spec scenario for the four capabilities by checklist
-- [ ] 9.2 Run `openspec validate add-dvc-tui --strict`; verify it passes
-- [ ] 9.3 Inspect `jj status` and `jj diff --git`, describe the revision and move the task bookmark as in the workflow rules; verify `jj log` shows the described revision
+- [x] 9.1 End-to-end manual pass on the fixture: browse, see stale, run `R` on `train`, see statuses turn green, open experiments and sort by a metric; verify every spec scenario for the four capabilities by checklist
+- [x] 9.2 Run `openspec validate add-dvc-tui --strict`; verify it passes
+- [x] 9.3 Inspect `jj status` and `jj diff --git`, describe the revision and move the task bookmark as in the workflow rules; verify `jj log` shows the described revision
 
 ## Workflow follow-up
 

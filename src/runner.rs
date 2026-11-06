@@ -38,7 +38,12 @@ pub struct DvcNotFound {
 
 impl fmt::Display for DvcNotFound {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "dvc not found. Looked in: {}", self.searched.join("; "))
+        // One place per line: the log pane clips long lines instead of wrapping them.
+        write!(f, "dvc not found. Looked in:")?;
+        for place in &self.searched {
+            write!(f, "\n  {place}")?;
+        }
+        Ok(())
     }
 }
 
@@ -401,6 +406,14 @@ mod tests {
         executable(&on_path);
         let path_var = env::join_paths([dir.path().join("empty"), dir.path().join("bin")]).unwrap();
         assert_eq!(find_dvc(dir.path(), None, Some(&path_var)), Ok(on_path));
+    }
+
+    #[test]
+    fn not_found_message_has_one_place_per_line() {
+        let error = DvcNotFound {
+            searched: vec!["a".into(), "b".into()],
+        };
+        assert_eq!(error.to_string(), "dvc not found. Looked in:\n  a\n  b");
     }
 
     #[test]
