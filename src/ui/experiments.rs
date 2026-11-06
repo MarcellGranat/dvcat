@@ -783,13 +783,21 @@ mod tests {
 
     #[test]
     fn with_too_little_data_the_panel_says_so() {
-        let mut app = app_showing(Some(Ok(none())));
+        // One experiment only: no metric has two numeric points.
+        let mut table = two();
+        let mut seen = 0;
+        table.rows.retain(|r| {
+            if r.kind != crate::experiments::RowKind::Experiment {
+                return true;
+            }
+            seen += 1;
+            seen == 1
+        });
+        let mut app = app_showing(Some(Ok(table)));
         app.experiments.plot = true;
         let text = screen(&app, 140, 34).join("\n");
-        assert!(
-            text.contains("Nothing to plot") || !text.contains(" vs "),
-            "{text}"
-        );
+        assert!(text.contains("Nothing to plot"), "{text}");
+        assert!(!text.contains(" vs "), "{text}");
     }
 
     #[test]

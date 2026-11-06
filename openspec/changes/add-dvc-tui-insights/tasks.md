@@ -36,16 +36,16 @@
 
 ## 6. DAG view
 
-- [ ] 6.1 Add layer assignment and ordering (barycenter sweep) with virtual nodes for layer-skipping edges; verify unit tests on chain, fork, join, diamond and skip-layer graphs
-- [ ] 6.2 Add the direction-bit canvas, track allocation and box/arrow drawing; verify golden-string tests for the same graphs, including crossings
-- [ ] 6.3 Add the `g` view: status colours, cursor navigation along edges and layers, scrolling, Enter to jump, `r`/`R` to run, empty-project state; verify `App` key tests and `TestBackend` tests
-- [ ] 6.4 Manual pass on the demo and on `articleIVdb` (read-only) at several terminal sizes; update README keys and legend
+- [x] 6.1 Add layer assignment and ordering (barycenter sweep) with virtual nodes for layer-skipping edges; verify unit tests on chain, fork, join, diamond and skip-layer graphs
+- [x] 6.2 Add the direction-bit canvas, track allocation and box/arrow drawing; verify golden-string tests for the same graphs, including crossings
+- [x] 6.3 Add the `g` view: status colours, cursor navigation along edges and layers, scrolling, Enter to jump, `r`/`R` to run, empty-project state; verify `App` key tests and `TestBackend` tests
+- [x] 6.4 Manual pass on the demo and on `articleIVdb` (read-only) at several terminal sizes; update README keys and legend
 
 ## 7. Integration and wrap-up
 
-- [ ] 7.1 End-to-end pass on the Git demo and a templated fixture covering every scenario in the six specs by checklist; fix gaps found
-- [ ] 7.2 Run `openspec validate add-dvc-tui-insights --strict`, `cargo fmt`, clippy with `-D warnings` and all tests including the DVC-backed ones
-- [ ] 7.3 Inspect `jj status` and `jj diff --git`, describe the revision and move the task bookmark; verify `jj log`
+- [x] 7.1 End-to-end pass on the Git demo and a templated fixture covering every scenario in the six specs by checklist; fix gaps found
+- [x] 7.2 Run `openspec validate add-dvc-tui-insights --strict`, `cargo fmt`, clippy with `-D warnings` and all tests including the DVC-backed ones
+- [x] 7.3 Inspect `jj status` and `jj diff --git`, describe the revision and move the task bookmark; verify `jj log`
 
 ## Workflow follow-up
 

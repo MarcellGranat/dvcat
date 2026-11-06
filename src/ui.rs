@@ -8,6 +8,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
+mod dag;
 mod experiments;
 
 use crate::{
@@ -65,6 +66,17 @@ const PROMPT_KEYS: &[(&str, &str)] = &[
     ("Esc", "cancel"),
 ];
 const CONFIRM_KEYS: &[(&str, &str)] = &[("y/Enter", "yes"), ("n/Esc", "no")];
+const DAG_KEYS: &[(&str, &str)] = &[
+    ("h/l", "upstream/downstream"),
+    ("j/k", "same layer"),
+    ("Enter", "open stage"),
+    ("r", "run"),
+    ("R", "run+upstream"),
+    ("x", "cancel"),
+    ("g/Esc", "back"),
+    ("e", "experiments"),
+    ("q", "quit"),
+];
 const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("j/k", "row"),
     ("h/l", "column"),
@@ -117,6 +129,10 @@ pub fn view(app: &App, frame: &mut Frame) {
         View::Experiments => {
             experiments::render(app, frame, main);
             EXPERIMENTS_KEYS
+        }
+        View::Dag => {
+            dag::render(app, frame, main);
+            DAG_KEYS
         }
     };
     // The popup floats over everything else.
@@ -215,6 +231,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     };
     let tabs = Line::from(vec![
         tab("Pipeline", app.view == View::Pipeline),
+        tab("Graph", app.view == View::Dag),
         tab("Experiments", app.view == View::Experiments),
     ]);
     // `Line::width` counts the displayed width, so the tabs hug the right edge.
@@ -357,7 +374,7 @@ fn render_files(app: &App, files: &[FileEntry], frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn kind_color(kind: FileKind) -> Color {
+pub(super) fn kind_color(kind: FileKind) -> Color {
     match kind {
         FileKind::Dep => theme::BLUE,
         FileKind::Param => theme::PEACH,
@@ -699,7 +716,7 @@ fn label_span(label: &str) -> Span<'static> {
 }
 
 /// Glyph, text and colour for a status; `None` means the check has not finished yet.
-fn badge(status: Option<Status>) -> (&'static str, &'static str, Color) {
+pub(super) fn badge(status: Option<Status>) -> (&'static str, &'static str, Color) {
     match status {
         None => ("…", "checking", theme::OVERLAY0),
         Some(Status::UpToDate) => ("✓", "up to date", theme::GREEN),
@@ -1352,5 +1369,182 @@ mod tests {
         let text = screen_at(&app, 24);
         assert!(text.contains("⚠ '~' is not allowed"), "{text}");
         assert!(!text.contains("creates the branch"), "{text}");
+    }
+
+    // ---- graph view ----
+
+    fn graph_app(app: App) -> App {
+        let mut app = with_statuses(app);
+        app.view = View::Dag;
+        app
+    }
+
+    #[test]
+    fn graph_draws_boxes_with_status_glyphs_and_arrows() {
+        let app = graph_app(demo_app());
+        let rows = render(&app, 100, 20);
+        let text = rows.join("\n");
+        assert!(
+            text.contains("◆ dvc-tui") && text.contains("Graph"),
+            "{text}"
+        );
+        for name in ["prepare", "features", "train"] {
+            assert!(
+                text.contains(&format!("✓ {name}")),
+                "missing {name}:\n{text}"
+            );
+        }
+        assert_eq!(text.matches('▶').count(), 2, "{text}");
+        assert!(text.contains("╭") && text.contains("╰"), "{text}");
+        // prepare is left of features is left of train
+        let line = rows.iter().find(|r| r.contains("✓ prepare")).unwrap();
+        assert!(
+            line.find("prepare") < line.find("features")
+                && line.find("features") < line.find("train"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn the_selected_box_is_highlighted_and_described_below() {
+        let mut app = graph_app(demo_app());
+        app.selected = 2;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| view(&app, frame)).unwrap();
+        let rows: Vec<String> = (0..20)
+            .map(|y| {
+                (0..100)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol().to_owned())
+                    .collect()
+            })
+            .collect();
+        let y = rows.iter().position(|r| r.contains("✓ train")).unwrap() as u16;
+        let x = rows[y as usize].find("train").unwrap();
+        let x = rows[y as usize][..x].chars().count() as u16;
+        assert_eq!(terminal.backend().buffer()[(x, y)].bg, theme::SURFACE0);
+        let other = rows[y as usize].find("prepare").unwrap();
+        let other = rows[y as usize][..other].chars().count() as u16;
+        assert_ne!(terminal.backend().buffer()[(other, y)].bg, theme::SURFACE0);
+        assert!(
+            rows.join("\n").contains("train · ✓ up to date"),
+            "{}",
+            rows.join("\n")
+        );
+    }
+
+    #[test]
+    fn stale_stages_show_their_colour_and_first_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::test_support::copy_dir(&fixture("demo"), dir.path());
+        std::fs::remove_file(dir.path().join("model.txt")).unwrap();
+        let mut app = graph_app(app_at(dir.path()));
+        app.selected = 2;
+        let text = render(&app, 100, 20).join("\n");
+        assert!(text.contains("● train"), "{text}");
+        assert!(
+            text.contains("train · ● stale · missing output: model.txt"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_empty_project_says_so_in_the_graph_view() {
+        let (_dir, app) = app_with_files(&[("dvc.yaml", "stages: {}\n")]);
+        let app = graph_app(app);
+        assert!(
+            render(&app, 100, 20)
+                .join("\n")
+                .contains("(no stages in dvc.yaml)")
+        );
+    }
+
+    #[test]
+    fn a_graph_wider_than_the_screen_scrolls_to_the_selected_stage() {
+        let mut yaml = String::from("stages:\n");
+        for i in 0..12 {
+            let dep = if i == 0 {
+                String::new()
+            } else {
+                format!("    deps: [o{}.txt]\n", i - 1)
+            };
+            yaml.push_str(&format!(
+                "  stage_number_{i}:\n    cmd: x\n{dep}    outs: [o{i}.txt]\n"
+            ));
+        }
+        let (_dir, app) = app_with_files(&[("dvc.yaml", &yaml)]);
+        let mut app = graph_app(app);
+        let first = render(&app, 70, 14).join("\n");
+        assert!(
+            first.contains("stage_number_0") && !first.contains("stage_number_11"),
+            "{first}"
+        );
+        app.selected = 11;
+        let last = render(&app, 70, 14).join("\n");
+        assert!(
+            last.contains("stage_number_11") && !last.contains("stage_number_0 "),
+            "{last}"
+        );
+    }
+
+    #[test]
+    fn the_graph_view_survives_tiny_terminals() {
+        let app = graph_app(demo_app());
+        for (w, h) in [(10, 4), (30, 6), (1, 1), (60, 3)] {
+            let _ = render(&app, w, h);
+        }
+    }
+
+    #[test]
+    fn graph_footer_lists_its_keys() {
+        let app = graph_app(demo_app());
+        let rows = render(&app, 120, 20);
+        assert!(
+            rows[19].contains("h/l upstream/downstream") && rows[19].contains("Enter open stage"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_graph_info_line_does_not_repeat_never_run() {
+        let (_dir, app) = app_with_files(&[("dvc.yaml", "stages:\n  a:\n    cmd: x\n")]);
+        let app = graph_app(with_statuses(app));
+        let text = render(&app, 100, 20).join("\n");
+        assert!(text.contains("a · ○ never run"), "{text}");
+        assert!(!text.contains("never run · never run"), "{text}");
+    }
+
+    #[test]
+    fn graph_boxes_take_their_border_colour_from_the_stage_status() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::test_support::copy_dir(&fixture("demo"), dir.path());
+        std::fs::remove_file(dir.path().join("model.txt")).unwrap();
+        let mut app = graph_app(app_at(dir.path()));
+        app.selected = 0; // the cursor is elsewhere, so train's border shows its status colour
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| view(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let find = |name: &str| {
+            (0..20u16)
+                .find_map(|y| {
+                    let row: String = (0..100u16)
+                        .map(|x| buffer[(x, y)].symbol().to_owned())
+                        .collect();
+                    row.find(name)
+                        .map(|byte| (row[..byte].chars().count() as u16, y))
+                })
+                .unwrap()
+        };
+        let (x, y) = find("train");
+        assert_eq!(
+            buffer[(x - 4, y - 1)].fg,
+            theme::YELLOW,
+            "stale = yellow border"
+        );
+        let (x, y) = find("features");
+        assert_eq!(
+            buffer[(x - 4, y - 1)].fg,
+            theme::GREEN,
+            "up to date = green border"
+        );
     }
 }

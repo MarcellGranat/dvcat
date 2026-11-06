@@ -10,6 +10,7 @@ use std::{
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
+    dag::{self, Layout, Move},
     experiments::{self, RowKind, Sort, Table},
     files::{self, FileEntry, Preview},
     form::{ExperimentForm, FormAction},
@@ -73,6 +74,8 @@ enum Action {
 pub enum View {
     Pipeline,
     Experiments,
+    /// The stage graph, drawn as boxes and lines.
+    Dag,
 }
 
 /// Everything the experiments view needs to remember.
@@ -205,6 +208,8 @@ pub struct App {
     pub view: View,
     pub experiments: ExperimentsView,
     pub focus: Focus,
+    /// Where the graph view draws each stage; computed once, because the stages do not change.
+    pub dag: Layout,
     /// The open "new experiment" form, if any. Like the preview, it is modal.
     pub form: Option<ExperimentForm>,
     pub confirm: Option<Confirm>,
@@ -224,9 +229,12 @@ pub struct App {
 
 impl App {
     pub fn new(project: Project, graph: Graph) -> Self {
+        let names: Vec<&str> = project.stages.iter().map(|s| s.name.as_str()).collect();
+        let dag = dag::layout(&names, &graph);
         Self {
             project,
             graph,
+            dag,
             selected: 0,
             statuses: None,
             run: None,
@@ -353,11 +361,20 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char('e') => self.toggle_view(),
+            KeyCode::Char('g') => {
+                self.view = if self.view == View::Dag {
+                    View::Pipeline
+                } else {
+                    View::Dag
+                };
+                Vec::new()
+            }
             // Stopping a run makes sense from either view.
             KeyCode::Char('x') => self.request_cancel(),
             code => match self.view {
                 View::Pipeline => self.on_pipeline_key(code),
                 View::Experiments => self.on_experiments_key(code),
+                View::Dag => self.on_dag_key(code),
             },
         }
     }
@@ -430,13 +447,44 @@ impl App {
         Vec::new()
     }
 
+    /// Keys in the graph view: move along edges (`h`/`l`) and within a layer (`j`/`k`).
+    fn on_dag_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        let movement = match code {
+            KeyCode::Char('h') | KeyCode::Left => Some(Move::Upstream),
+            KeyCode::Char('l') | KeyCode::Right => Some(Move::Downstream),
+            KeyCode::Char('k') | KeyCode::Up => Some(Move::Up),
+            KeyCode::Char('j') | KeyCode::Down => Some(Move::Down),
+            _ => None,
+        };
+        if let Some(movement) = movement {
+            if let Some(&stage) = self.graph.order.get(self.selected) {
+                let target = self.dag.step(stage, movement);
+                if let Some(position) = self.graph.order.iter().position(|&s| s == target)
+                    && position != self.selected
+                {
+                    self.selected = position;
+                    self.file_cursor = 0;
+                }
+            }
+            return Vec::new();
+        }
+        match code {
+            // The graph view shares the selection with the pipeline view, so Enter just goes there.
+            KeyCode::Enter | KeyCode::Esc => self.view = View::Pipeline,
+            KeyCode::Char('r') => return self.request_run(false),
+            KeyCode::Char('R') => return self.request_run(true),
+            _ => {}
+        }
+        Vec::new()
+    }
+
     fn toggle_view(&mut self) -> Vec<Effect> {
         match self.view {
             View::Experiments => {
                 self.view = View::Pipeline;
                 Vec::new()
             }
-            View::Pipeline => {
+            View::Pipeline | View::Dag => {
                 self.view = View::Experiments;
                 // Fetch on first visit only; F5 refreshes after that.
                 if self.experiments.data.is_none() {
@@ -2149,5 +2197,121 @@ mod files_pane_tests {
         let mut app = on_train_files();
         let effects = press(&mut app, KeyCode::Char('r'));
         assert!(matches!(effects.as_slice(), [Effect::StartRun { .. }]));
+    }
+}
+
+#[cfg(test)]
+mod dag_view_tests {
+    use super::*;
+    use crate::test_support::{app_with_files, demo_app};
+
+    fn press(app: &mut App, code: KeyCode) -> Vec<Effect> {
+        app.update(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    }
+
+    const DIAMOND: &str = "stages:\n  a:\n    cmd: x\n    outs: [a.txt]\n  b:\n    cmd: x\n    deps: [a.txt]\n    outs: [b.txt]\n  c:\n    cmd: x\n    deps: [a.txt]\n    outs: [c.txt]\n  d:\n    cmd: x\n    deps: [b.txt, c.txt]\n";
+
+    #[test]
+    fn g_opens_the_graph_and_g_or_esc_leaves_it() {
+        let mut app = demo_app();
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.view, View::Dag);
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.view, View::Pipeline);
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.view, View::Pipeline);
+    }
+
+    #[test]
+    fn e_from_the_graph_goes_to_the_experiments() {
+        let mut app = demo_app();
+        press(&mut app, KeyCode::Char('g'));
+        let effects = press(&mut app, KeyCode::Char('e'));
+        assert_eq!(app.view, View::Experiments);
+        assert_eq!(effects, [Effect::FetchExperiments]);
+    }
+
+    #[test]
+    fn l_and_h_walk_along_the_edges_and_share_the_selection_with_the_list() {
+        let mut app = demo_app(); // prepare -> features -> train
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.selected_stage().unwrap().name, "train");
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(
+            app.selected_stage().unwrap().name,
+            "train",
+            "no further downstream"
+        );
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.selected_stage().unwrap().name, "features");
+    }
+
+    #[test]
+    fn j_and_k_move_within_a_layer() {
+        let (_dir, mut app) = app_with_files(&[("dvc.yaml", DIAMOND)]);
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('l')); // a -> b or c
+        let first = app.selected_stage().unwrap().name.clone();
+        press(&mut app, KeyCode::Char('j'));
+        let second = app.selected_stage().unwrap().name.clone();
+        assert_ne!(first, second);
+        assert!(["b", "c"].contains(&first.as_str()) && ["b", "c"].contains(&second.as_str()));
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.selected_stage().unwrap().name, first);
+    }
+
+    #[test]
+    fn enter_opens_the_stage_in_the_pipeline_view() {
+        let mut app = demo_app();
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.view, View::Pipeline);
+        assert_eq!(app.selected_stage().unwrap().name, "features");
+    }
+
+    #[test]
+    fn r_and_capital_r_run_the_stage_under_the_cursor() {
+        let mut app = demo_app();
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('l'));
+        let effects = press(&mut app, KeyCode::Char('r'));
+        assert_eq!(
+            effects,
+            [Effect::StartRun {
+                stage: "features".into(),
+                with_upstream: false
+            }]
+        );
+    }
+
+    #[test]
+    fn moving_in_the_graph_resets_the_file_cursor() {
+        let mut app = demo_app();
+        app.file_cursor = 2;
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.file_cursor, 0);
+    }
+
+    #[test]
+    fn an_empty_project_survives_graph_keys() {
+        let (_dir, mut app) = app_with_files(&[("dvc.yaml", "stages: {}\n")]);
+        press(&mut app, KeyCode::Char('g'));
+        for c in ['h', 'j', 'k', 'l'] {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(press(&mut app, KeyCode::Char('r')).is_empty());
+    }
+
+    #[test]
+    fn the_graph_view_does_not_swallow_modal_keys_or_quit() {
+        let mut app = demo_app();
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.should_quit);
     }
 }

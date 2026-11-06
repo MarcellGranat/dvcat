@@ -3,9 +3,10 @@
 A minimal terminal UI for [DVC](https://dvc.org): browse a pipeline, see which stages are stale and why,
 run a stage with a live log, and compare experiments. Written in Rust with [ratatui](https://ratatui.rs).
 
-> **Status:** under construction. The change plan lives in `openspec/changes/add-dvc-tui/`.
-> Features below are marked *(planned)* until they are implemented.
-> Working today: pipeline list, detail pane, files pane with preview and editor, stale detection with reasons, running and cancelling stages, an experiments table with a new-experiment form. The look is [Catppuccin Mocha](https://catppuccin.com) and needs a true-colour terminal.
+> **Status:** feature-complete for the plans in `openspec/changes/` (`add-dvc-tui` and `add-dvc-tui-insights`).
+> Pipeline list, detail and files panes with preview and editor, stale detection (params, deps, cmd, outputs) with reasons,
+> `foreach`/`matrix` stages, a stage graph, runs with a live log and cancel, and an experiments table with deltas,
+> a chart, new/apply/remove/branch actions. The look is [Catppuccin Mocha](https://catppuccin.com) and needs a true-colour terminal.
 
 ## Quick start
 
@@ -43,6 +44,7 @@ If none is found, pressing `r` explains where it looked.
 | `x`        | cancel the running stage (from either view) |
 | `PgUp` / `PgDn` | scroll the log                      |
 | `e`        | switch between the pipeline and the experiments table |
+| `g`        | show the stage graph (`g` or `Esc` to leave); `h`/`l` follow the edges, `j`/`k` move within a layer, `Enter` opens the stage, `r`/`R` run it |
 | `h` / `l`  | *(experiments)* move the column cursor   |
 | `s`        | *(experiments)* sort by the cursor column; again flips the direction |
 | `m`        | *(experiments)* show metrics of experiments as differences from their baseline (`▲ +0.1867`) and back |
@@ -75,6 +77,12 @@ It runs `dvc exp run --temp` (an isolated copy, so your workspace is untouched),
 The files pane lists what the selected stage reads and writes (deps, param files, outs, metrics).
 A preview shows at most the first 64 KiB of a file; directories are listed and binary files are not dumped.
 While a preview is open it receives all keys (`q` closes it), except `Ctrl+C`, which still quits.
+
+## Graph
+
+`g` draws the stages as boxes in dependency layers, left to right, with a line and an arrowhead for each dependency.
+Boxes carry the status glyph and colour of the stage list; the line under the graph describes the stage under the cursor.
+The cursor is shared with the pipeline view (the same stage stays selected), and a graph larger than the screen scrolls to keep it in view.
 
 ## Templated stages
 
