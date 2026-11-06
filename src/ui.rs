@@ -11,7 +11,7 @@ use ratatui::{
 mod experiments;
 
 use crate::{
-    app::{App, Focus, Run, RunPhase, View},
+    app::{App, Confirm, Focus, Run, RunPhase, View},
     files::{FileEntry, FileKind, Preview, PreviewBody},
     form::ExperimentForm,
     project::{ParamRef, flatten_leaves, param_value},
@@ -57,11 +57,14 @@ const FORM_KEYS: &[(&str, &str)] = &[
     ("Enter", "run"),
     ("Esc", "cancel"),
 ];
+const CONFIRM_KEYS: &[(&str, &str)] = &[("y/Enter", "yes"), ("n/Esc", "no")];
 const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("j/k", "row"),
     ("h/l", "column"),
     ("s", "sort"),
-    ("n", "new experiment"),
+    ("n", "new"),
+    ("a", "apply"),
+    ("d", "remove"),
     ("F5", "refresh"),
     ("x", "cancel run"),
     ("e/Esc", "pipeline"),
@@ -118,6 +121,14 @@ pub fn view(app: &App, frame: &mut Frame) {
         Some(form) => {
             render_form(form, frame, main);
             FORM_KEYS
+        }
+        None => keys,
+    };
+
+    let keys = match &app.confirm {
+        Some(confirm) => {
+            render_confirm(confirm, frame, main);
+            CONFIRM_KEYS
         }
         None => keys,
     };
@@ -500,6 +511,50 @@ fn render_form(form: &ExperimentForm, frame: &mut Frame, area: Rect) {
         (None, None) => Line::from(""),
     };
     frame.render_widget(Paragraph::new(status), status_area);
+}
+
+/// A small yes/no popup in the middle of the screen.
+fn render_confirm(confirm: &Confirm, frame: &mut Frame, area: Rect) {
+    let width = (area.width * 60 / 100).max(40).min(area.width);
+    // Count the lines after wrapping: the inner width is the popup minus its borders.
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    let wrapped: usize = confirm
+        .lines
+        .iter()
+        .map(|line| line.chars().count().div_ceil(inner).max(1))
+        .sum();
+    // text + a blank line + the yes/no line + two border rows
+    let height = (wrapped as u16 + 4).min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let mut text: Vec<Line> = confirm
+        .lines
+        .iter()
+        .map(|l| Line::from(l.as_str()))
+        .collect();
+    text.push(Line::from(""));
+    text.push(Line::from(vec![
+        Span::styled(
+            "y",
+            Style::new().fg(theme::GREEN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" yes   ", theme::muted()),
+        Span::styled(
+            "n",
+            Style::new().fg(theme::RED).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" no", theme::muted()),
+    ]));
+    let block = pane(confirm.title.as_str(), true).border_style(Style::new().fg(theme::PEACH));
+    frame.render_widget(
+        Paragraph::new(text).wrap(Wrap { trim: false }).block(block),
+        popup,
+    );
 }
 
 fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
@@ -1167,5 +1222,27 @@ mod tests {
         let final_label = app.form.as_ref().unwrap().fields[last - 1].label.clone();
         let text = screen_at(&app, 8);
         assert!(text.contains(&final_label), "{text}");
+    }
+
+    #[test]
+    fn confirm_popup_shows_the_question_and_its_own_key_hints() {
+        let mut app = demo_app();
+        app.confirm = Some(Confirm {
+            title: "Remove lr-005?".into(),
+            lines: vec!["Deletes the experiment.".into()],
+            label: "remove lr-005".into(),
+            args: vec![],
+        });
+        let rows = render(&app, 100, 24);
+        let text = rows.join("\n");
+        assert!(text.contains("Remove lr-005?"), "{text}");
+        assert!(text.contains("Deletes the experiment."), "{text}");
+        assert!(
+            rows[23].contains("y/Enter yes") && rows[23].contains("n/Esc no"),
+            "{rows:#?}"
+        );
+        for (w, h) in [(10, 4), (1, 1)] {
+            let _ = render(&app, w, h); // must not panic
+        }
     }
 }

@@ -120,6 +120,16 @@ pub fn exp_run_args(name: Option<&str>, overrides: &[(String, String)]) -> Vec<S
     args
 }
 
+/// DVC saves the previous workspace to `refs/exps/apply/stash` before overwriting it.
+/// (`--no-force` is deprecated since DVC 3 and no longer protects anything.)
+pub fn exp_apply_args(experiment: &str) -> Vec<String> {
+    ["exp", "apply", experiment].map(String::from).into()
+}
+
+pub fn exp_remove_args(experiment: &str) -> Vec<String> {
+    ["exp", "remove", experiment].map(String::from).into()
+}
+
 // ---------------------------------------------------------------------------------------------
 // Running
 // ---------------------------------------------------------------------------------------------
@@ -452,6 +462,12 @@ mod tests {
                 "params.yaml:train.lr=0.2"
             ]
         );
+    }
+
+    #[test]
+    fn apply_and_remove_args_name_the_experiment() {
+        assert_eq!(exp_apply_args("lr-005"), ["exp", "apply", "lr-005"]);
+        assert_eq!(exp_remove_args("lr-005"), ["exp", "remove", "lr-005"]);
     }
 
     #[test]

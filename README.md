@@ -48,6 +48,13 @@ If none is found, pressing `r` explains where it looked.
 | `F5`       | *(experiments)* reload with `dvc exp show --json` |
 | `n`        | *(experiments)* new experiment: a form with a name and every param, pre-filled from the row under the cursor |
 
+| `a` / `d`  | *(experiments)* apply / remove the experiment under the cursor, after a yes/no question |
+
+**Apply and remove.** `a` runs `dvc exp apply <name>`: it overwrites params, lock file, metrics and outputs in your workspace.
+DVC first saves your uncommitted changes (undo with `git reset --hard && git stash apply refs/exps/apply/stash`).
+`d` runs `dvc exp remove <name>`, which cannot be undone unless the experiment was pushed. Both only work on experiment rows,
+show DVC's output in the log, and reload the table afterwards.
+
 **New experiment form.** `Tab`/`Shift+Tab` move between the fields, typing edits, `Ctrl+U` clears a field and `Enter` runs it.
 Only the values you changed become `-S` overrides, and the command that will run is shown at the bottom of the form.
 It runs `dvc exp run --temp` (an isolated copy, so your workspace is untouched), switches to the pipeline view to show the live log, and reloads the table when the run ends.

@@ -10,7 +10,7 @@ use std::{
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    experiments::{self, Sort, Table},
+    experiments::{self, RowKind, Sort, Table},
     files::{self, FileEntry, Preview},
     form::{ExperimentForm, FormAction},
     graph::Graph,
@@ -44,11 +44,28 @@ pub enum Event {
     PreviewLoaded(Preview),
 }
 
+/// A yes/no question shown before something destructive. Modal, like the preview and the form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confirm {
+    pub title: String,
+    pub lines: Vec<String>,
+    /// Names the run in the UI once confirmed.
+    pub label: String,
+    pub args: Vec<String>,
+}
+
 /// Which pane of the pipeline view receives the movement keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Stages,
     Files,
+}
+
+/// What `a` / `d` ask about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Apply,
+    Remove,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +189,7 @@ pub struct App {
     pub focus: Focus,
     /// The open "new experiment" form, if any. Like the preview, it is modal.
     pub form: Option<ExperimentForm>,
+    pub confirm: Option<Confirm>,
     /// Cursor in the files pane, an index into [`App::selected_files`].
     pub file_cursor: usize,
     /// The open preview popup, if any. While it is open it receives all keys.
@@ -197,6 +215,7 @@ impl App {
             experiments: ExperimentsView::default(),
             focus: Focus::Stages,
             form: None,
+            confirm: None,
             file_cursor: 0,
             preview: None,
             editor_request: None,
@@ -297,6 +316,9 @@ impl App {
         }
         if self.form.is_some() {
             return self.on_form_key(key);
+        }
+        if self.confirm.is_some() {
+            return self.on_confirm_key(key.code);
         }
         // An open popup is modal: it gets every key, so `q` closes it instead of quitting.
         if self.preview.is_some() {
@@ -430,6 +452,8 @@ impl App {
             }
             KeyCode::Char('s') => self.sort_by_cursor_column(),
             KeyCode::Char('n') => self.open_experiment_form(),
+            KeyCode::Char('a') => self.ask_about_selected_experiment(Action::Apply),
+            KeyCode::Char('d') => self.ask_about_selected_experiment(Action::Remove),
             KeyCode::F(5) => return self.request_experiments(),
             KeyCode::Esc => self.view = View::Pipeline,
             _ => {}
@@ -453,6 +477,73 @@ impl App {
         self.form = Some(ExperimentForm::from_table(table, row));
     }
 
+    /// `a` / `d`: ask before applying or removing the experiment under the cursor.
+    fn ask_about_selected_experiment(&mut self, action: Action) {
+        if self.is_running() {
+            self.notice = Some("a run is already in progress (x cancels it)".to_owned());
+            return;
+        }
+        let Some(table) = self.experiments.table() else {
+            self.notice = Some("experiments are not available (press F5 to load them)".to_owned());
+            return;
+        };
+        let rows = table.ordered(&self.experiments.sort);
+        let Some(row) = rows
+            .get(self.experiments.row)
+            .filter(|r| r.kind == RowKind::Experiment)
+        else {
+            self.notice = Some(
+                "select an experiment row first (not the workspace or the baseline)".to_owned(),
+            );
+            return;
+        };
+        let name = row.label.clone();
+        self.confirm = Some(match action {
+            Action::Apply => Confirm {
+                title: format!("Apply {name}?"),
+                lines: vec![
+                    "Overwrites params, lock file, metrics and outputs in your workspace.".into(),
+                    "Your uncommitted changes are saved first. To undo: git reset --hard && git stash apply refs/exps/apply/stash".into(),
+                ],
+                label: format!("apply {name}"),
+                args: runner::exp_apply_args(&name),
+            },
+            Action::Remove => Confirm {
+                title: format!("Remove {name}?"),
+                lines: vec![
+                    "Deletes the experiment from this repository.".into(),
+                    "This cannot be undone (unless it was pushed to a remote).".into(),
+                ],
+                label: format!("remove {name}"),
+                args: runner::exp_remove_args(&name),
+            },
+        });
+    }
+
+    fn on_confirm_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        match code {
+            KeyCode::Char('y') | KeyCode::Enter => match self.confirm.take() {
+                Some(Confirm { label, args, .. }) => self.begin_dvc_run(label, args),
+                None => Vec::new(),
+            },
+            KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
+                self.confirm = None;
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Start a `dvc` command that works on experiments, showing its log in the pipeline view.
+    /// When it ends the experiments table is reloaded (see `on_run_finished`).
+    fn begin_dvc_run(&mut self, label: String, args: Vec<String>) -> Vec<Effect> {
+        self.run = Some(Run::experiment(label, args));
+        // The log pane lives in the pipeline view, so show it.
+        self.view = View::Pipeline;
+        self.notice = Some("running; press e for the table when it ends".to_owned());
+        vec![Effect::StartExperiment]
+    }
+
     fn on_form_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         // Ask before borrowing `self.form` mutably: `is_running` borrows all of `self`.
         let running = self.is_running();
@@ -471,12 +562,7 @@ impl App {
                     return Vec::new();
                 }
                 self.form = None;
-                self.run = Some(Run::experiment(label, args));
-                // The log pane lives in the pipeline view, so show it.
-                self.view = View::Pipeline;
-                self.notice =
-                    Some("experiment started; press e for the table when it ends".to_owned());
-                vec![Effect::StartExperiment]
+                self.begin_dvc_run(label, args)
             }
         }
     }
@@ -1565,6 +1651,113 @@ mod experiments_view_tests {
         assert!(effects.is_empty());
         assert!(h.app.form.as_ref().unwrap().error.is_some());
         assert!(h.app.run.is_none());
+    }
+
+    // ----- apply / remove -----
+
+    /// Move the cursor onto the row with this label.
+    fn cursor_on(h: &mut Harness, label: &str) {
+        let table = h.app.experiments.table().unwrap();
+        let rows = table.ordered(&h.app.experiments.sort);
+        h.app.experiments.row = rows.iter().position(|r| r.label == label).unwrap();
+    }
+
+    fn wait_until_finished(h: &mut Harness) {
+        let deadline = Instant::now() + WAIT;
+        while h.app.is_running() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let event = h.rx.recv_timeout(left).expect("run never finished");
+            h.app.dispatch(event, &h.tx);
+        }
+    }
+
+    #[test]
+    fn a_and_d_only_work_on_experiment_rows() {
+        let mut h = with_table_loaded();
+        for label in ["workspace", "master"] {
+            cursor_on(&mut h, label);
+            h.press(KeyCode::Char('a'));
+            h.press(KeyCode::Char('d'));
+            assert!(h.app.confirm.is_none(), "{label}");
+            assert!(h.app.notice.as_deref().unwrap().contains("experiment row"));
+        }
+    }
+
+    #[test]
+    fn a_asks_first_and_n_or_esc_changes_nothing() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "lr-010");
+        h.press(KeyCode::Char('a'));
+        let confirm = h.app.confirm.as_ref().expect("asks first");
+        assert_eq!(confirm.title, "Apply lr-010?");
+        assert_eq!(confirm.args, ["exp", "apply", "lr-010"]);
+        assert!(h.app.run.is_none(), "nothing runs before the answer");
+
+        h.press(KeyCode::Char('n'));
+        assert!(h.app.confirm.is_none() && h.app.run.is_none());
+        h.press(KeyCode::Char('d'));
+        h.press(KeyCode::Esc);
+        assert!(h.app.confirm.is_none() && h.app.run.is_none());
+        assert_eq!(calls(&h), ["exp show --json"], "only the initial fetch");
+    }
+
+    #[test]
+    fn the_question_is_modal() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "lr-005");
+        h.press(KeyCode::Char('d'));
+        for code in [KeyCode::Char('e'), KeyCode::Char('x'), KeyCode::Char('j')] {
+            h.press(code);
+        }
+        assert!(h.app.confirm.is_some());
+        assert_eq!(h.app.view, View::Experiments);
+        assert!(!h.app.should_quit);
+    }
+
+    #[test]
+    fn y_applies_shows_the_log_and_reloads_the_table() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "lr-010");
+        h.press(KeyCode::Char('a'));
+        let effects = h.press(KeyCode::Char('y'));
+        assert_eq!(effects, [Effect::StartExperiment]);
+        assert_eq!(h.app.view, View::Pipeline);
+        assert_eq!(
+            h.app.run.as_ref().unwrap().command_line(),
+            "dvc exp apply lr-010"
+        );
+        wait_until_finished(&mut h);
+        assert!(h.app.experiments.loading, "table reloads afterwards");
+        h.wait_for_data();
+        assert!(calls(&h).contains(&"exp apply lr-010".to_owned()));
+        assert_eq!(h.fetch_count(), 2);
+    }
+
+    #[test]
+    fn enter_confirms_removal_of_the_chosen_experiment() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "lr-005");
+        h.press(KeyCode::Char('d'));
+        assert_eq!(h.app.confirm.as_ref().unwrap().title, "Remove lr-005?");
+        h.press(KeyCode::Enter);
+        wait_until_finished(&mut h);
+        assert!(calls(&h).contains(&"exp remove lr-005".to_owned()));
+    }
+
+    #[test]
+    fn a_and_d_are_refused_while_something_runs() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "lr-010");
+        h.app.run = Some(Run::new("a".into(), false));
+        h.press(KeyCode::Char('a'));
+        assert!(h.app.confirm.is_none());
+        assert!(
+            h.app
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("already in progress")
+        );
     }
 }
 

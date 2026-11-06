@@ -68,6 +68,9 @@ Git demo: the fixture cannot contain a `.git`, so `make-git-demo.sh` builds a Gi
 `form.rs` holds the form as pure state: a name and a `FormField` (label `file:key`, original, value) per param column, with `on_key` returning a `FormAction` (`Continue`, `Cancel`, `Submit{label, args}`). Only changed fields become `-S` overrides, built by `runner::exp_run_args`, which always passes `--temp` so runs do not inherit each other's params or touch the workspace. Submitting stores the arguments in `App::run` (`Run` now carries its `args`, so stage runs and experiment runs share one start/stream/cancel path) and switches to the pipeline view, where the log pane lives. When an experiment run ends, the app asks for a fresh `exp show` (the repository lock is free again). Like the preview, the form is modal.
 *Alternatives:* free-text `key=value` input (error-prone, no discovery of param names); a separate log pane in the experiments view (more layout for little gain).
 
+### 8e. Apply and remove
+`a` and `d` build a `Confirm` (title, explanation, label, `dvc` arguments); like the preview and the form it is modal, and `y`/Enter hands the arguments to the same `begin_dvc_run` path the form uses, so output streaming, cancel and the table reload are shared. `dvc exp apply` is run without `--no-force`: in DVC 3.67 that flag is deprecated and no longer protects anything; apply always overwrites the workspace and saves the previous state to `refs/exps/apply/stash`, which the question mentions. Removal is irreversible, which the question says.
+
 ### 9. Dependencies
 `ratatui` (re-exports `crossterm`), `serde` + `serde_json`, one maintained YAML crate for serde, `anyhow`, `md-5`. Dev: `tempfile`. A panic hook and a drop guard restore the terminal on every exit path.
 

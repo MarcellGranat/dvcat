@@ -54,6 +54,7 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 - [x] 8.3 Add `o` to open a file in `$VISUAL`/`$EDITOR` with terminal suspend/resume and a pausable key thread; verify manually with a real editor
 - [x] 8.4 Add `tests/fixtures/demo/make-git-demo.sh` (Git copy with three experiments) and `tests/git_demo.rs`; verify against real DVC
 - [x] 8.5 Add the new-experiment form (`n` in the experiments view): `form.rs`, `runner::exp_run_args` (`--temp`, `-n`, `-S`), shared run path with stage runs, log shown in the pipeline view, table reload when the run ends; verify unit and fake-`dvc` tests and a manual run against real DVC in the Git demo
+- [x] 8.6 Add `a` (apply) and `d` (remove) in the experiments view with a confirmation popup, sharing the run path with the form; verify fake-`dvc` tests and real apply/remove in the Git demo
 
 ## 9. Integration and wrap-up
 

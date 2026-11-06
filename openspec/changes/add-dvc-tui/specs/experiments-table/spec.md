@@ -54,6 +54,25 @@ The system SHALL fetch experiments without blocking the interface, and SHALL sho
 - **WHEN** the user presses `F5` in the experiments view
 - **THEN** the experiments are fetched again
 
+### Requirement: Apply and remove experiments
+The system SHALL let the user apply the experiment under the cursor to the workspace (`dvc exp apply`) or remove it (`dvc exp remove`), asking for confirmation first, showing the command's output, and reloading the table afterwards.
+
+#### Scenario: Confirmation
+- **WHEN** the user presses `a` or `d` on an experiment row
+- **THEN** a yes/no question names the experiment and what will happen, and nothing runs until the user answers `y` or Enter
+
+#### Scenario: Declined
+- **WHEN** the user answers `n` or Esc
+- **THEN** no command runs
+
+#### Scenario: Not an experiment
+- **WHEN** the cursor is on the workspace or baseline row, or a run is active, or the table is not loaded
+- **THEN** no question is asked and a notice says why
+
+#### Scenario: Apply protects the workspace
+- **WHEN** an experiment is applied
+- **THEN** the question explains that uncommitted changes are saved first and how to undo
+
 ### Requirement: New experiment form
 The system SHALL let the user start a new experiment from the experiments view: a form with an optional name and one editable value per param column, pre-filled from the row under the cursor, that runs `dvc exp run --temp` with a `-S file:key=value` override for each changed value.
 
