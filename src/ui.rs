@@ -1,5 +1,7 @@
 //! Drawing. Everything here takes `&App`: it can read state but never change it.
 
+use std::time::Duration;
+
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -269,26 +271,50 @@ fn render_pipeline(app: &App, frame: &mut Frame, area: Rect) {
     }
 }
 
+/// How a finished run is described, and in which colour.
+fn outcome_label(outcome: &RunOutcome) -> (String, Color) {
+    match outcome {
+        RunOutcome::Succeeded => ("✓ succeeded".to_owned(), theme::GREEN),
+        RunOutcome::Failed { code: Some(code) } => (format!("✗ failed (exit {code})"), theme::RED),
+        RunOutcome::Failed { code: None } => {
+            ("✗ failed (ended by a signal)".to_owned(), theme::RED)
+        }
+        RunOutcome::Cancelled => ("cancelled".to_owned(), theme::YELLOW),
+        RunOutcome::NotStarted(_) => ("✗ not started".to_owned(), theme::RED),
+    }
+}
+
+/// `850ms`, `4.2s`, `2m 05s`, `1h 02m`.
+pub fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds >= 3600 {
+        format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60)
+    } else if seconds >= 60 {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
+    } else if seconds >= 1 {
+        format!("{:.1}s", duration.as_secs_f64())
+    } else {
+        format!("{}ms", duration.as_millis())
+    }
+}
+
 fn render_log(run: &Run, frame: &mut Frame, area: Rect) {
     let (phase_text, color) = match &run.phase {
         RunPhase::Running => ("running…".to_owned(), theme::SAPPHIRE),
         RunPhase::Cancelling => ("cancelling…".to_owned(), theme::YELLOW),
-        RunPhase::Finished(RunOutcome::Succeeded) => ("✓ succeeded".to_owned(), theme::GREEN),
-        RunPhase::Finished(RunOutcome::Failed { code: Some(code) }) => {
-            (format!("✗ failed (exit {code})"), theme::RED)
-        }
-        RunPhase::Finished(RunOutcome::Failed { code: None }) => {
-            ("✗ failed (ended by a signal)".to_owned(), theme::RED)
-        }
-        RunPhase::Finished(RunOutcome::Cancelled) => ("cancelled".to_owned(), theme::YELLOW),
-        RunPhase::Finished(RunOutcome::NotStarted(_)) => ("✗ not started".to_owned(), theme::RED),
+        RunPhase::Finished(outcome) => outcome_label(outcome),
     };
     let scrolled = if run.scroll > 0 {
         format!(" · {} lines back", run.scroll)
     } else {
         String::new()
     };
-    let title = format!("{} · {phase_text}{scrolled}", run.command_line());
+    // The scroll position matters more than the time, so the time goes last (a narrow pane cuts the end).
+    let title = format!(
+        "{} · {phase_text}{scrolled} · {}",
+        run.command_line(),
+        format_duration(run.duration())
+    );
 
     // Show the window of lines that ends `scroll` lines above the bottom.
     let visible_rows = usize::from(area.height.saturating_sub(2));
@@ -652,6 +678,17 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
     if let Some(status) = status {
         let why = status.reasons.iter().map(ToString::to_string).collect();
         lines.extend(section("why", why, Style::new().fg(theme::YELLOW)));
+    }
+    if let Some(last) = app.last_runs.get(&stage.name) {
+        let (text, color) = outcome_label(&last.outcome);
+        lines.push(Line::from(vec![
+            label_span("last run"),
+            Span::styled(text, Style::new().fg(color)),
+            Span::styled(
+                format!(" · {}", format_duration(last.duration)),
+                theme::muted(),
+            ),
+        ]));
     }
     lines.push(Line::from(""));
     lines.extend(section(
@@ -1546,5 +1583,51 @@ mod tests {
             theme::GREEN,
             "up to date = green border"
         );
+    }
+
+    #[test]
+    fn durations_read_naturally_at_every_scale() {
+        use std::time::Duration as D;
+        let cases = [
+            (D::from_millis(0), "0ms"),
+            (D::from_millis(850), "850ms"),
+            (D::from_millis(4_200), "4.2s"),
+            (D::from_secs(59), "59.0s"),
+            (D::from_secs(125), "2m 05s"),
+            (D::from_secs(3_720), "1h 02m"),
+        ];
+        for (duration, expected) in cases {
+            assert_eq!(format_duration(duration), expected);
+        }
+    }
+
+    #[test]
+    fn the_log_title_shows_the_time_a_run_took() {
+        let mut app = demo_app();
+        let mut run = Run::new("train".into(), false);
+        run.phase = RunPhase::Finished(RunOutcome::Succeeded);
+        app.run = Some(run);
+        let text = screen(&app);
+        let title = text.lines().find(|l| l.contains("dvc repro")).unwrap();
+        assert!(title.contains("✓ succeeded · "), "{title}");
+        assert!(title.contains("ms") || title.contains('s'), "{title}");
+    }
+
+    #[test]
+    fn the_detail_pane_remembers_how_the_last_run_of_a_stage_ended() {
+        use crate::app::LastRun;
+        let mut app = demo_app();
+        assert!(!screen(&app).contains("last run"));
+        app.last_runs.insert(
+            "prepare".into(),
+            LastRun {
+                outcome: RunOutcome::Failed { code: Some(2) },
+                duration: std::time::Duration::from_millis(4_200),
+            },
+        );
+        let text = screen(&app);
+        assert!(text.contains("last run ✗ failed (exit 2) · 4.2s"), "{text}");
+        app.selected = 1; // another stage has no last run
+        assert!(!screen(&app).contains("last run"));
     }
 }

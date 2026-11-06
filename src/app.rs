@@ -1,10 +1,11 @@
 //! Application state and the one place that changes it.
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::mpsc::Sender,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -156,10 +157,26 @@ pub struct Run {
     pub phase: RunPhase,
     /// Lines scrolled back from the bottom; 0 follows new output.
     pub scroll: usize,
+    /// When the run was requested.
+    started: Instant,
+    /// How long it took; `None` while it is still going.
+    elapsed: Option<Duration>,
     job: Option<RunningJob>,
 }
 
+/// What the previous run of a stage in this session ended with, and how long it took.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastRun {
+    pub outcome: RunOutcome,
+    pub duration: Duration,
+}
+
 impl Run {
+    /// Time since the run started, or its final duration once it has ended.
+    pub fn duration(&self) -> Duration {
+        self.elapsed.unwrap_or_else(|| self.started.elapsed())
+    }
+
     pub fn new(stage: String, with_upstream: bool) -> Self {
         let args = runner::repro_args(&stage, with_upstream);
         Self::with_args(stage, args, with_upstream, RunKind::Stage)
@@ -183,6 +200,8 @@ impl Run {
             log: LogBuffer::new(),
             phase: RunPhase::Running,
             scroll: 0,
+            started: Instant::now(),
+            elapsed: None,
             job: None,
         }
     }
@@ -214,6 +233,8 @@ pub struct App {
     pub form: Option<ExperimentForm>,
     pub confirm: Option<Confirm>,
     pub prompt: Option<Prompt>,
+    /// The latest finished run of each stage started from this session (DVC keeps no durations).
+    pub last_runs: BTreeMap<String, LastRun>,
     /// Cursor in the files pane, an index into [`App::selected_files`].
     pub file_cursor: usize,
     /// The open preview popup, if any. While it is open it receives all keys.
@@ -244,6 +265,7 @@ impl App {
             form: None,
             confirm: None,
             prompt: None,
+            last_runs: BTreeMap::new(),
             file_cursor: 0,
             preview: None,
             editor_request: None,
@@ -770,6 +792,21 @@ impl App {
         let refresh = !matches!(outcome, RunOutcome::NotStarted(_));
         let kind = run.kind.clone();
         let succeeded = outcome == RunOutcome::Succeeded;
+        let duration = run.started.elapsed();
+        run.elapsed = Some(duration);
+        if kind == RunKind::Stage && !matches!(outcome, RunOutcome::NotStarted(_)) {
+            let stage = run.stage.clone();
+            self.last_runs.insert(
+                stage,
+                LastRun {
+                    outcome: outcome.clone(),
+                    duration,
+                },
+            );
+        }
+        let Some(run) = &mut self.run else {
+            return Vec::new();
+        };
         run.phase = RunPhase::Finished(outcome);
         let mut effects = Vec::new();
         // A new branch changes nothing in the workspace, so nothing needs re-checking.
@@ -2014,6 +2051,60 @@ mod experiments_view_tests {
                 .as_deref()
                 .is_none_or(|n| !n.contains("created"))
         );
+    }
+
+    // ----- run durations -----
+
+    #[test]
+    fn finishing_a_stage_run_records_its_outcome_and_duration() {
+        let mut h = harness("sleep 0.2");
+        h.app.run = None;
+        h.press(KeyCode::Char('r'));
+        wait_until_finished(&mut h);
+        let last = h.app.last_runs.get("a").expect("recorded");
+        assert_eq!(last.outcome, RunOutcome::Succeeded);
+        assert!(
+            last.duration >= Duration::from_millis(150),
+            "{:?}",
+            last.duration
+        );
+        let run = h.app.run.as_ref().unwrap();
+        assert_eq!(
+            run.duration(),
+            last.duration,
+            "the log title freezes at the same value"
+        );
+    }
+
+    #[test]
+    fn a_running_run_reports_growing_time_and_a_new_run_replaces_the_record() {
+        let mut h = harness("exit 3");
+        h.press(KeyCode::Char('r'));
+        let early = h.app.run.as_ref().unwrap().duration();
+        wait_until_finished(&mut h);
+        assert!(h.app.run.as_ref().unwrap().duration() >= early);
+        assert_eq!(
+            h.app.last_runs["a"].outcome,
+            RunOutcome::Failed { code: Some(3) }
+        );
+        h.press(KeyCode::Char('r'));
+        wait_until_finished(&mut h);
+        assert_eq!(h.app.last_runs.len(), 1, "one record per stage");
+    }
+
+    #[test]
+    fn experiment_runs_and_failures_to_start_leave_no_stage_record() {
+        let mut h = harness("true");
+        h.app.run = Some(Run::experiment(
+            "exp x".into(),
+            vec!["exp".into(), "run".into()],
+        ));
+        h.app.update(Event::RunFinished(RunOutcome::Succeeded));
+        assert!(h.app.last_runs.is_empty());
+        h.app.run = Some(Run::new("a".into(), false));
+        h.app
+            .update(Event::RunFinished(RunOutcome::NotStarted("no dvc".into())));
+        assert!(h.app.last_runs.is_empty());
     }
 }
 

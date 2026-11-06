@@ -84,6 +84,12 @@ While a preview is open it receives all keys (`q` closes it), except `Ctrl+C`, w
 Boxes carry the status glyph and colour of the stage list; the line under the graph describes the stage under the cursor.
 The cursor is shared with the pipeline view (the same stage stays selected), and a graph larger than the screen scrolls to keep it in view.
 
+## Run times
+
+The log title shows how long a run has taken (live while it runs, fixed afterwards), and a stage's detail pane has a
+`last run` line with the outcome and duration of its latest run from this session. DVC itself keeps no durations, so
+runs made outside the interface, or before it was opened, have none.
+
 ## Templated stages
 
 `foreach`, `matrix` and `vars` in `dvc.yaml` are expanded the way DVC does, so `each@us`, `listed@0`, `rich@a` and `grid@lin-1`

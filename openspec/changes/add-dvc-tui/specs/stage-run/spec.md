@@ -61,3 +61,19 @@ The system SHALL stop an active run when the user presses `x`, without leaving o
 #### Scenario: Quit during run
 - **WHEN** the user quits while a run is active
 - **THEN** the process is terminated before the application exits
+
+### Requirement: Run duration
+The system SHALL show how long a run has taken, live while it is active and fixed once it ends, and SHALL remember how the latest run of each stage started from the interface ended and how long it took.
+
+#### Scenario: Live and final time
+- **WHEN** a run is active, and then ends
+- **THEN** the log title shows the elapsed time, which keeps growing while the run is active and stays at the final duration afterwards
+
+#### Scenario: Last run of a stage
+- **WHEN** a stage run has finished in this session
+- **THEN** the stage's detail pane shows its outcome and duration, and a later run of the same stage replaces them
+
+#### Scenario: Nothing to report
+- **WHEN** a stage has not been run from the interface, or its run never started
+- **THEN** no last-run line is shown for it
+

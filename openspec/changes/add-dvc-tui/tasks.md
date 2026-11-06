@@ -40,6 +40,7 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 - [x] 6.2 Implement spawning in its own process group, merged stdout/stderr readers, `\n`/`\r` line handling and ANSI stripping, sending `Event`s; verify tests against a small shell script that prints progress with `\r`
 - [x] 6.3 Wire `r` (`--single-item`), `R` and the single-run rule into `update`, with a log pane showing live output; verify by running a fixture stage and watching output stream while navigation stays responsive
 - [x] 6.4 Show success/failure with exit code, recompute stage statuses after the run, and implement `x` cancel plus terminate-on-quit with TERM-then-KILL escalation; verify with a long-running script that no child process remains after cancel or quit
+- [x] 6.5 Show run durations: live and final time in the log title and a "last run" line per stage in the detail pane; verify unit tests and a real run
 
 ## 7. Experiments table
 
