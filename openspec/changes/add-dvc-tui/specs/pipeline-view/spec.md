@@ -47,6 +47,43 @@ The system SHALL show, for the selected stage, its command, deps, params and out
 - **WHEN** a stage declares params
 - **THEN** each param key is shown with its current workspace value
 
+### Requirement: Files pane
+The system SHALL list the files of the selected stage (deps, param files, outs and metrics, each path once) in a pane of its own, and SHALL let the user move a cursor over them when the pane has focus.
+
+#### Scenario: Files follow the selection
+- **WHEN** the user selects another stage
+- **THEN** the files pane lists that stage's files and the cursor returns to the first entry
+
+#### Scenario: Focus switch
+- **WHEN** the user presses `Tab`
+- **THEN** focus moves between the stage list and the files pane, and only the focused pane shows a cursor
+
+### Requirement: File preview and editor
+The system SHALL open a scrollable read-only preview of the file under the cursor on `Enter`, and SHALL hand the file to `$VISUAL`/`$EDITOR` on `o`, restoring the UI afterwards.
+
+#### Scenario: Preview a file
+- **WHEN** the user presses `Enter` on a text file
+- **THEN** a popup shows its first 64 KiB with line numbers, and `q` or `Esc` closes it
+
+#### Scenario: Preview of a directory, binary or missing file
+- **WHEN** the file is a directory, binary, or does not exist
+- **THEN** the popup lists the directory entries, states that the file is binary, or states that it does not exist yet, instead of failing
+
+#### Scenario: Open in editor
+- **WHEN** the user presses `o` on an existing file
+- **THEN** the editor takes over the terminal, and on exit the UI returns and stage statuses are rechecked
+
+#### Scenario: Editor for a missing file
+- **WHEN** the user presses `o` on a file that does not exist
+- **THEN** a notice says so and no editor is started
+
+### Requirement: Visual theme
+The system SHALL draw with the Catppuccin Mocha palette: a filled background, rounded pane borders, a lit border on the focused pane, a header with the project name and view tabs, and key hints in the footer.
+
+#### Scenario: Focused pane
+- **WHEN** a pane has focus
+- **THEN** its border and title are drawn in the accent colour and other panes in a muted one
+
 ### Requirement: Quit and help
 The system SHALL exit and restore the terminal when the user presses `q`, and SHALL show the available key bindings on screen.
 

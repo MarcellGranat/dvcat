@@ -47,11 +47,18 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 - [x] 7.2 Implement sorting (numeric vs text, empty last, asc/desc toggle); verify unit tests
 - [x] 7.3 Add the experiments view with background fetch, loading indicator, error display, `F5` refresh, and disable-during-run message; verify with `TestBackend` tests and a manual run
 
-## 8. Integration and wrap-up
+## 8. Look, files pane and Git demo
 
-- [ ] 8.1 End-to-end manual pass on the fixture: browse, see stale, run `R` on `train`, see statuses turn green, open experiments and sort by a metric; verify every spec scenario for the four capabilities by checklist
-- [ ] 8.2 Run `openspec validate add-dvc-tui --strict`; verify it passes
-- [ ] 8.3 Inspect `jj status` and `jj diff --git`, describe the revision and move the task bookmark as in the workflow rules; verify `jj log` shows the described revision
+- [x] 8.1 Add `theme.rs` (Catppuccin Mocha), rounded panes, focus styling, header with view tabs and footer key hints; verify with `TestBackend` tests on colours and layout
+- [x] 8.2 Add the files pane (`Tab` focus, cursor, `Enter` preview popup, bounded read, directory/binary/missing handling); verify unit tests and a manual run
+- [x] 8.3 Add `o` to open a file in `$VISUAL`/`$EDITOR` with terminal suspend/resume and a pausable key thread; verify manually with a real editor
+- [x] 8.4 Add `tests/fixtures/demo/make-git-demo.sh` (Git copy with three experiments) and `tests/git_demo.rs`; verify against real DVC
+
+## 9. Integration and wrap-up
+
+- [ ] 9.1 End-to-end manual pass on the fixture: browse, see stale, run `R` on `train`, see statuses turn green, open experiments and sort by a metric; verify every spec scenario for the four capabilities by checklist
+- [ ] 9.2 Run `openspec validate add-dvc-tui --strict`; verify it passes
+- [ ] 9.3 Inspect `jj status` and `jj diff --git`, describe the revision and move the task bookmark as in the workflow rules; verify `jj log` shows the described revision
 
 ## Workflow follow-up
 

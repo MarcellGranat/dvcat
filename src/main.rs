@@ -1,13 +1,24 @@
 use std::{
-    sync::mpsc::{self, RecvTimeoutError, Sender},
+    io::stdout,
+    path::Path,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, RecvTimeoutError, Sender},
+    },
     thread,
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ratatui::{
     DefaultTerminal,
-    crossterm::event::{self, Event as TermEvent, KeyEventKind},
+    crossterm::{
+        event::{self, Event as TermEvent, KeyEventKind},
+        execute,
+        terminal::{EnterAlternateScreen, enable_raw_mode},
+    },
 };
 
 use dvc_tui::{
@@ -18,6 +29,8 @@ use dvc_tui::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How long the key thread waits for input before it looks at the `paused` flag again.
+const KEY_POLL: Duration = Duration::from_millis(100);
 
 /// Restores the terminal when dropped: on normal exit, on `?` early return, and during panics.
 struct TerminalGuard;
@@ -31,6 +44,10 @@ impl Drop for TerminalGuard {
 fn main() -> Result<()> {
     // Load first: if this fails, the error prints on the normal screen, not the alternate one.
     let dir = cli::project_dir_from_args(std::env::args())?;
+    // An absolute path gives the header a real project name even for `dvc_tui .`.
+    let dir = dir
+        .canonicalize()
+        .with_context(|| format!("cannot open project directory {}", dir.display()))?;
     let project = Project::load(&dir)?;
     let graph = graph::build(&project.stages)?; // a cycle error converts into anyhow via `?`
 
@@ -42,8 +59,12 @@ fn main() -> Result<()> {
 
 fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
     let (tx, rx) = mpsc::channel();
+    // While an editor owns the terminal, the key thread must not read (it would steal keystrokes).
+    // An `Arc<AtomicBool>` is a flag both threads can see; `Arc` shares ownership, the atomic
+    // makes reading and writing it safe without a lock.
+    let paused = Arc::new(AtomicBool::new(false));
     // Each producer gets its own clone of the sender; `tx` stays here for later jobs.
-    spawn_key_thread(tx.clone());
+    spawn_key_thread(tx.clone(), Arc::clone(&paused));
     app.spawn_status_check(&tx);
 
     while !app.should_quit {
@@ -55,17 +76,65 @@ fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
             Err(RecvTimeoutError::Timeout) => {} // nothing happened; just redraw
             Err(RecvTimeoutError::Disconnected) => break, // the key thread died
         }
+        if let Some(path) = app.editor_request.take() {
+            let result = open_in_editor(terminal, &paused, &path);
+            app.editor_closed(result.err(), &tx);
+        }
     }
     // Never leave a `dvc` process behind.
     app.shutdown();
     Ok(())
 }
 
+/// Give the terminal to `$VISUAL`/`$EDITOR` until it exits, then take it back.
+/// `Err` carries a message for the footer.
+fn open_in_editor(
+    terminal: &mut DefaultTerminal,
+    paused: &AtomicBool,
+    path: &Path,
+) -> Result<(), String> {
+    let command = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_owned());
+    // `EDITOR="code -w"` is common, so split the program from its arguments.
+    let mut words = command.split_whitespace();
+    let program = words.next().unwrap_or("vi");
+
+    paused.store(true, Ordering::SeqCst);
+    // Let a key-thread poll that is already in flight finish before the editor starts reading.
+    thread::sleep(KEY_POLL * 2);
+    ratatui::restore();
+    let status = Command::new(program).args(words).arg(path).status();
+    // Back to raw mode and the alternate screen; the old frame is stale, so clear it.
+    let back = enable_raw_mode().and_then(|()| execute!(stdout(), EnterAlternateScreen));
+    paused.store(false, Ordering::SeqCst);
+    back.map_err(|error| format!("cannot restore the terminal: {error}"))?;
+    let _ = terminal.clear();
+
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("{program} exited with {status}")),
+        Err(error) => Err(format!("cannot start '{program}': {error} (set $EDITOR)")),
+    }
+}
+
 /// Forward key presses from the terminal into our event channel.
-fn spawn_key_thread(tx: Sender<Event>) {
+fn spawn_key_thread(tx: Sender<Event>, paused: Arc<AtomicBool>) {
     thread::spawn(move || {
-        // `read` blocks until something happens, which is why this lives on its own thread.
-        while let Ok(term_event) = event::read() {
+        loop {
+            if paused.load(Ordering::SeqCst) {
+                thread::sleep(KEY_POLL / 2);
+                continue;
+            }
+            // `poll` waits a short while instead of blocking forever, so the flag gets rechecked.
+            match event::poll(KEY_POLL) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(_) => break,
+            }
+            let Ok(term_event) = event::read() else {
+                break;
+            };
             // Some terminals report both press and release; only act on presses.
             if let TermEvent::Key(key) = term_event
                 && key.kind == KeyEventKind::Press

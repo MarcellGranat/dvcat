@@ -3,11 +3,13 @@
 pub mod app;
 pub mod cli;
 pub mod experiments;
+pub mod files;
 pub mod graph;
 pub mod log;
 pub mod project;
 pub mod runner;
 pub mod stale;
+pub mod theme;
 pub mod ui;
 
 #[cfg(test)]

@@ -3,13 +3,14 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
-    widgets::{Block, Cell, Paragraph, Row as TableRow, Table as TableWidget, TableState, Wrap},
+    style::{Color, Modifier, Style},
+    widgets::{Cell, Paragraph, Row as TableRow, Table as TableWidget, TableState, Wrap},
 };
 
 use crate::{
     app::{App, ExperimentsView},
     experiments::{Column, Direction, Row, RowKind, Table, cell_text},
+    theme,
 };
 
 const MAX_COLUMN_WIDTH: usize = 28;
@@ -20,23 +21,23 @@ const HINT_NO_EXPERIMENTS: &str =
 
 pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let view = &app.experiments;
-    let block = Block::bordered().title(title(app));
+    let block = super::pane(title(app), true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     match &view.data {
         None if view.loading => {
             let text = "loading… (running `dvc exp show --json`)";
-            frame.render_widget(Paragraph::new(text).dim(), inner);
+            frame.render_widget(Paragraph::new(text).style(theme::muted()), inner);
         }
         None => {
             let text = "Experiments are not loaded yet. Press F5 to load them.";
-            frame.render_widget(Paragraph::new(text).dim(), inner);
+            frame.render_widget(Paragraph::new(text).style(theme::muted()), inner);
         }
         Some(Err(message)) => {
             let text = format!("{message}\n\nPress F5 to try again.");
             let error = Paragraph::new(text)
-                .style(Style::new().fg(Color::Red))
+                .style(Style::new().fg(theme::RED))
                 .wrap(Wrap { trim: false });
             frame.render_widget(error, inner);
         }
@@ -45,7 +46,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn title(app: &App) -> String {
-    let mut title = String::from(" Experiments");
+    let mut title = String::from("Experiments");
     if app.experiments.loading {
         title.push_str(if app.experiments.data.is_some() {
             " · refreshing…"
@@ -56,7 +57,6 @@ fn title(app: &App) -> String {
     if app.is_running() {
         title.push_str(" · stage run in progress (x cancels; refresh unavailable)");
     }
-    title.push(' ');
     title
 }
 
@@ -107,7 +107,7 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
     let widget = TableWidget::new(body, constraints)
         .header(header)
         .column_spacing(COLUMN_SPACING as u16)
-        .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        .row_highlight_style(theme::selected());
     let mut state = TableState::default().with_selected(Some(view.row));
     frame.render_stateful_widget(widget, table_area, &mut state);
 
@@ -123,10 +123,10 @@ fn info_line<'a>(
 ) -> Paragraph<'a> {
     let selected = rows.get(view.row);
     if let Some(error) = selected.and_then(|row| row.error.as_ref()) {
-        return Paragraph::new(format!("⚠ {error}")).style(Style::new().fg(Color::Red));
+        return Paragraph::new(format!("⚠ {error}")).style(Style::new().fg(theme::RED));
     }
     if !table.has_experiments() {
-        return Paragraph::new(HINT_NO_EXPERIMENTS).style(Style::new().fg(Color::Yellow));
+        return Paragraph::new(HINT_NO_EXPERIMENTS).style(Style::new().fg(theme::YELLOW));
     }
     let mut parts = vec![format!("column: {}", column.title())];
     if let Some(row) = selected {
@@ -135,7 +135,7 @@ fn info_line<'a>(
             parts.push(timestamp.replace('T', " "));
         }
     }
-    Paragraph::new(parts.join("  ·  ")).dim()
+    Paragraph::new(parts.join("  ·  ")).style(theme::muted())
 }
 
 fn name_cell(row: &Row) -> String {
@@ -148,17 +148,21 @@ fn name_cell(row: &Row) -> String {
 
 fn row_style(row: &Row) -> Style {
     match row.kind {
-        RowKind::Workspace => Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        RowKind::Baseline => Style::new().add_modifier(Modifier::BOLD),
-        RowKind::Experiment => Style::new(),
+        RowKind::Workspace => Style::new()
+            .fg(theme::SAPPHIRE)
+            .add_modifier(Modifier::BOLD),
+        RowKind::Baseline => Style::new()
+            .fg(theme::LAVENDER)
+            .add_modifier(Modifier::BOLD),
+        RowKind::Experiment => Style::new().fg(theme::TEXT),
     }
 }
 
 fn header_color(column: &Column) -> Color {
     match column {
-        Column::Name => Color::White,
-        Column::Param(_) => Color::Cyan,
-        Column::Metric(_) => Color::Green,
+        Column::Name => theme::TEXT,
+        Column::Param(_) => theme::PEACH,
+        Column::Metric(_) => theme::GREEN,
     }
 }
 
@@ -382,14 +386,10 @@ mod tests {
         let terminal = draw(&app, 150, 14);
         let rows = rows_of(&terminal);
         let y = rows.iter().position(|r| r.contains("lr-010")).unwrap() as u16;
-        let reversed = |y: u16| {
-            terminal.backend().buffer()[(5, y)]
-                .style()
-                .add_modifier
-                .contains(Modifier::REVERSED)
-        };
-        assert!(reversed(y));
-        assert!(!reversed(y + 1));
+        let highlighted =
+            |y: u16| terminal.backend().buffer()[(5, y)].style().bg == Some(theme::SURFACE0);
+        assert!(highlighted(y));
+        assert!(!highlighted(y + 1));
     }
 
     #[test]

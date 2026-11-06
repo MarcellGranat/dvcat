@@ -59,6 +59,11 @@ Typed serde structs for the parts of `exp show --json` we use, with `Option` and
 ### 8b. Experiments view
 `dvc exp show --json` is fetched on a background thread (first visit to the view, then `F5`) and arrives as `Event::Experiments(Result<Table, String>)`. The previous table stays on screen while a refresh runs. The fetch is refused while a stage runs, because `dvc repro` holds the repository lock. Only experiments are sorted (within their baseline); the workspace and baseline rows stay pinned. Numbers sort numerically, everything else as text, empty cells always last. Columns that do not fit are windowed around the cursor, with the name column pinned. Cancelling (`x`) works from both views.
 
+### 8c. Theme, files pane and editor handoff
+`theme.rs` holds the Catppuccin Mocha palette as `Color::Rgb` constants and the few shared styles, so no other module names a colour. The pipeline view has two focusable panes (`Focus::{Stages, Files}`, toggled with `Tab`); the files pane lists `files::stage_files`. A preview is `Effect::LoadPreview` -> `Event::PreviewLoaded`, read synchronously but capped at 64 KiB (`files::PREVIEW_LIMIT`); while it is open it is modal and takes every key but `Ctrl+C`. `o` does not touch the terminal from `update`: the effect stores `editor_request`, and `main` suspends the UI (`ratatui::restore`), runs `$VISUAL`/`$EDITOR`, re-enters raw mode and the alternate screen, and re-checks statuses. The key thread uses `event::poll` and an `Arc<AtomicBool>` pause flag so it cannot steal the editor's keystrokes.
+*Alternatives:* a built-in editor (large scope); preview only (no way to edit params); a theme config file (non-goal in v1).
+Git demo: the fixture cannot contain a `.git`, so `make-git-demo.sh` builds a Git copy with three `dvc exp run --temp` experiments (`--temp` isolates them from each other's params).
+
 ### 9. Dependencies
 `ratatui` (re-exports `crossterm`), `serde` + `serde_json`, one maintained YAML crate for serde, `anyhow`, `md-5`. Dev: `tempfile`. A panic hook and a drop guard restore the terminal on every exit path.
 

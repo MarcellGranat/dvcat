@@ -11,6 +11,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
     experiments::{self, Sort, Table},
+    files::{self, FileEntry, Preview},
     graph::Graph,
     log::LogBuffer,
     project::{Project, Stage},
@@ -18,6 +19,8 @@ use crate::{
     stale::{self, StageStatus},
 };
 
+/// How many lines PageUp/PageDown move a preview.
+const PREVIEW_PAGE: usize = 15;
 /// How many lines PageUp/PageDown move the log.
 const LOG_SCROLL_STEP: usize = 10;
 /// Extra time, beyond the kill grace period, that quitting waits for a run to exit.
@@ -36,6 +39,15 @@ pub enum Event {
     RunFinished(RunOutcome),
     /// The result of a background `dvc exp show --json`.
     Experiments(Result<Table, String>),
+    /// A file's content, read for the preview popup.
+    PreviewLoaded(Preview),
+}
+
+/// Which pane of the pipeline view receives the movement keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Stages,
+    Files,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +87,10 @@ pub enum Effect {
     RefreshStatuses,
     /// Run `dvc exp show --json` in the background.
     FetchExperiments,
+    /// Read a project file (path relative to the project root) for the preview popup.
+    LoadPreview(String),
+    /// Hand a project file to `$EDITOR`. The terminal belongs to `main`, so we only leave a request.
+    OpenEditor(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +148,13 @@ pub struct App {
     pub run: Option<Run>,
     pub view: View,
     pub experiments: ExperimentsView,
+    pub focus: Focus,
+    /// Cursor in the files pane, an index into [`App::selected_files`].
+    pub file_cursor: usize,
+    /// The open preview popup, if any. While it is open it receives all keys.
+    pub preview: Option<Preview>,
+    /// Set when the user asked for the editor; `main` takes it, suspends the UI and runs the editor.
+    pub editor_request: Option<PathBuf>,
     /// A one-line message for the footer; cleared by the next key press.
     pub notice: Option<String>,
     /// How to find `dvc`. A plain function pointer so tests can substitute their own.
@@ -149,6 +172,10 @@ impl App {
             run: None,
             view: View::Pipeline,
             experiments: ExperimentsView::default(),
+            focus: Focus::Stages,
+            file_cursor: 0,
+            preview: None,
+            editor_request: None,
             notice: None,
             dvc_lookup: runner::find_dvc_in_env,
             should_quit: false,
@@ -189,6 +216,13 @@ impl App {
         self.stage_at(self.selected)
     }
 
+    /// The files of the selected stage, in the order the files pane shows them.
+    pub fn selected_files(&self) -> Vec<FileEntry> {
+        self.selected_stage()
+            .map(files::stage_files)
+            .unwrap_or_default()
+    }
+
     /// Names of the stages the selected stage depends on (empty if none or nothing selected).
     pub fn selected_upstream(&self) -> Vec<&str> {
         let Some(&index) = self.graph.order.get(self.selected) else {
@@ -218,6 +252,10 @@ impl App {
                 Vec::new()
             }
             Event::RunFinished(outcome) => self.on_run_finished(outcome),
+            Event::PreviewLoaded(preview) => {
+                self.preview = Some(preview);
+                Vec::new()
+            }
             Event::Experiments(result) => {
                 self.experiments.loading = false;
                 self.experiments.data = Some(result);
@@ -232,6 +270,10 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return Vec::new();
+        }
+        // An open popup is modal: it gets every key, so `q` closes it instead of quitting.
+        if self.preview.is_some() {
+            return self.on_preview_key(key.code);
         }
         match key.code {
             KeyCode::Char('q') => {
@@ -250,12 +292,67 @@ impl App {
 
     fn on_pipeline_key(&mut self, code: KeyCode) -> Vec<Effect> {
         match code {
-            KeyCode::Char('j') | KeyCode::Down => self.move_selection_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.move_selection_up(),
+            KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
+            KeyCode::Char('j') | KeyCode::Down => match self.focus {
+                Focus::Stages => self.move_selection_down(),
+                Focus::Files => self.move_file_cursor(1),
+            },
+            KeyCode::Char('k') | KeyCode::Up => match self.focus {
+                Focus::Stages => self.move_selection_up(),
+                Focus::Files => self.move_file_cursor(-1),
+            },
+            KeyCode::Enter => match self.focus {
+                // Enter on a stage steps into its files; Enter on a file opens the preview.
+                Focus::Stages => self.focus = Focus::Files,
+                Focus::Files => return self.preview_effect(Effect::LoadPreview),
+            },
+            KeyCode::Char('o') if self.focus == Focus::Files => {
+                return self.preview_effect(Effect::OpenEditor);
+            }
+            KeyCode::Esc if self.focus == Focus::Files => self.focus = Focus::Stages,
             KeyCode::Char('r') => return self.request_run(false),
             KeyCode::Char('R') => return self.request_run(true),
             KeyCode::PageUp => self.scroll_log_back(),
             KeyCode::PageDown => self.scroll_log_forward(),
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Stages => Focus::Files,
+            Focus::Files => Focus::Stages,
+        };
+    }
+
+    fn move_file_cursor(&mut self, delta: isize) {
+        let last = self.selected_files().len().saturating_sub(1);
+        self.file_cursor = self.file_cursor.saturating_add_signed(delta).min(last);
+    }
+
+    /// Build an effect for the file under the cursor (nothing if the stage has no files).
+    fn preview_effect(&self, make: fn(String) -> Effect) -> Vec<Effect> {
+        match self.selected_files().into_iter().nth(self.file_cursor) {
+            Some(entry) => vec![make(entry.path)],
+            None => Vec::new(),
+        }
+    }
+
+    fn on_preview_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        let Some(preview) = &mut self.preview else {
+            return Vec::new();
+        };
+        let last = preview.line_count().saturating_sub(1);
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => self.preview = None,
+            KeyCode::Char('j') | KeyCode::Down => preview.scroll = (preview.scroll + 1).min(last),
+            KeyCode::Char('k') | KeyCode::Up => preview.scroll = preview.scroll.saturating_sub(1),
+            KeyCode::PageDown => preview.scroll = (preview.scroll + PREVIEW_PAGE).min(last),
+            KeyCode::PageUp => preview.scroll = preview.scroll.saturating_sub(PREVIEW_PAGE),
+            KeyCode::Char('g') | KeyCode::Home => preview.scroll = 0,
+            KeyCode::Char('G') | KeyCode::End => preview.scroll = last,
+            KeyCode::Char('o') => return vec![Effect::OpenEditor(preview.path.clone())],
             _ => {}
         }
         Vec::new()
@@ -423,12 +520,35 @@ impl App {
                 }
             }
             Effect::FetchExperiments => self.fetch_experiments(tx),
+            Effect::LoadPreview(path) => {
+                // The read is capped (see `files::PREVIEW_LIMIT`), so doing it here is fast.
+                let body = files::load(&self.project.root, &path);
+                self.dispatch(Event::PreviewLoaded(Preview::new(path, body)), tx);
+            }
+            Effect::OpenEditor(path) => {
+                let full = self.project.root.join(&path);
+                if full.exists() {
+                    self.editor_request = Some(full);
+                } else {
+                    self.notice = Some(format!("{path} does not exist yet"));
+                }
+            }
             Effect::RefreshStatuses => {
                 if let Err(error) = self.project.reload_state() {
                     self.notice = Some(format!("could not reload project state: {error:#}"));
                 }
                 self.spawn_status_check(tx);
             }
+        }
+    }
+
+    /// The editor has exited. Show its error (if any) and re-check the stages: the user may have
+    /// changed `params.yaml` or a source file.
+    pub fn editor_closed(&mut self, error: Option<String>, tx: &Sender<Event>) {
+        self.execute(Effect::RefreshStatuses, tx);
+        // After the refresh, so a reload problem does not hide the editor's own error.
+        if error.is_some() {
+            self.notice = error;
         }
     }
 
@@ -477,12 +597,17 @@ impl App {
     fn move_selection_down(&mut self) {
         if self.selected + 1 < self.stage_count() {
             self.selected += 1;
+            self.file_cursor = 0;
         }
     }
 
     fn move_selection_up(&mut self) {
         // `saturating_sub` stops at 0 instead of underflowing (usize can't be negative).
+        let before = self.selected;
         self.selected = self.selected.saturating_sub(1);
+        if self.selected != before {
+            self.file_cursor = 0;
+        }
     }
 }
 
@@ -1200,5 +1325,188 @@ mod experiments_view_tests {
             h.press(code);
         }
         assert_eq!((h.app.experiments.row, h.app.experiments.column), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod files_pane_tests {
+    use super::*;
+    use crate::files::PreviewBody;
+    use crate::test_support::demo_app;
+
+    fn press(app: &mut App, code: KeyCode) -> Vec<Effect> {
+        app.update(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    }
+
+    /// `train` is selected and the files pane has focus. Its files: 2 deps, params.yaml, model.txt, metrics.json.
+    fn on_train_files() -> App {
+        let mut app = demo_app();
+        app.selected = 2;
+        press(&mut app, KeyCode::Tab);
+        app
+    }
+
+    #[test]
+    fn tab_moves_focus_between_the_panes_and_back() {
+        let mut app = demo_app();
+        assert_eq!(app.focus, Focus::Stages);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Files);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Stages);
+    }
+
+    #[test]
+    fn enter_on_a_stage_steps_into_its_files_and_esc_steps_back() {
+        let mut app = demo_app();
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.focus, Focus::Files);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.focus, Focus::Stages);
+    }
+
+    #[test]
+    fn j_and_k_move_the_file_cursor_and_stop_at_the_ends() {
+        let mut app = on_train_files();
+        assert_eq!(app.selected_files().len(), 5);
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        assert_eq!(app.file_cursor, 4);
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Char('k'));
+        }
+        assert_eq!(app.file_cursor, 0);
+        assert_eq!(app.selected, 2, "the stage selection must not move");
+    }
+
+    #[test]
+    fn changing_stage_resets_the_file_cursor() {
+        let mut app = on_train_files();
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.file_cursor, 1);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!((app.selected, app.file_cursor), (1, 0));
+    }
+
+    #[test]
+    fn enter_on_a_file_asks_for_its_preview() {
+        let mut app = on_train_files();
+        press(&mut app, KeyCode::Char('j')); // data/features.csv
+        let effects = press(&mut app, KeyCode::Enter);
+        assert_eq!(effects, [Effect::LoadPreview("data/features.csv".into())]);
+    }
+
+    #[test]
+    fn dispatch_reads_the_file_and_opens_the_popup() {
+        let mut app = on_train_files();
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Char('j')); // params.yaml
+        }
+        let (tx, _rx) = std::sync::mpsc::channel();
+        app.dispatch(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx,
+        );
+        let preview = app.preview.as_ref().expect("popup open");
+        assert_eq!(preview.path, "params.yaml");
+        assert!(matches!(preview.body, PreviewBody::Text { .. }));
+    }
+
+    fn open_popup(app: &mut App, text: &str) {
+        let body = PreviewBody::Text {
+            text: text.into(),
+            truncated: false,
+        };
+        app.update(Event::PreviewLoaded(Preview::new("a.txt".into(), body)));
+    }
+
+    #[test]
+    fn the_popup_is_modal_q_closes_it_instead_of_quitting() {
+        let mut app = demo_app();
+        open_popup(&mut app, "x\n");
+        press(&mut app, KeyCode::Char('e')); // would switch views
+        press(&mut app, KeyCode::Char('r')); // would start a run
+        assert_eq!(app.view, View::Pipeline);
+        assert!(app.run.is_none());
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.preview.is_none());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_still_quits_with_the_popup_open() {
+        let mut app = demo_app();
+        open_popup(&mut app, "x\n");
+        app.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn popup_scrolls_within_the_text() {
+        let mut app = demo_app();
+        open_popup(&mut app, &"l\n".repeat(40));
+        let scroll = |app: &App| app.preview.as_ref().unwrap().scroll;
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(scroll(&app), 1);
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!(scroll(&app), 16);
+        press(&mut app, KeyCode::Char('G'));
+        assert_eq!(scroll(&app), 39);
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!(scroll(&app), 39, "never past the last line");
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(scroll(&app), 0);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(scroll(&app), 0, "never below zero");
+    }
+
+    #[test]
+    fn o_requests_the_editor_for_an_existing_file() {
+        let mut app = on_train_files();
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Char('j')); // params.yaml
+        }
+        let effects = press(&mut app, KeyCode::Char('o'));
+        assert_eq!(effects, [Effect::OpenEditor("params.yaml".into())]);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        app.execute(effects.into_iter().next().unwrap(), &tx);
+        let requested = app.editor_request.take().expect("editor requested");
+        assert!(requested.ends_with("params.yaml"));
+    }
+
+    #[test]
+    fn o_on_a_missing_file_explains_instead_of_opening_the_editor() {
+        let (_dir, mut app) = crate::test_support::app_with_files(&[(
+            "dvc.yaml",
+            "stages:\n  a:\n    cmd: x\n    outs: [gone.txt]\n",
+        )]);
+        press(&mut app, KeyCode::Tab);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        for effect in press(&mut app, KeyCode::Char('o')) {
+            app.execute(effect, &tx);
+        }
+        assert!(app.editor_request.is_none());
+        assert_eq!(app.notice.as_deref(), Some("gone.txt does not exist yet"));
+    }
+
+    #[test]
+    fn a_stage_without_files_has_nothing_to_open() {
+        let (_dir, mut app) =
+            crate::test_support::app_with_files(&[("dvc.yaml", "stages:\n  a:\n    cmd: x\n")]);
+        press(&mut app, KeyCode::Tab);
+        assert!(press(&mut app, KeyCode::Enter).is_empty());
+        assert!(press(&mut app, KeyCode::Char('o')).is_empty());
+    }
+
+    #[test]
+    fn running_still_works_while_the_files_pane_has_focus() {
+        let mut app = on_train_files();
+        let effects = press(&mut app, KeyCode::Char('r'));
+        assert!(matches!(effects.as_slice(), [Effect::StartRun { .. }]));
     }
 }
