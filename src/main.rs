@@ -51,11 +51,13 @@ fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
         terminal.draw(|frame| ui::view(&app, frame))?;
         // ...so we may borrow it mutably here.
         match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(event) => app.update(event),
+            Ok(event) => app.dispatch(event, &tx),
             Err(RecvTimeoutError::Timeout) => {} // nothing happened; just redraw
             Err(RecvTimeoutError::Disconnected) => break, // the key thread died
         }
     }
+    // Never leave a `dvc` process behind.
+    app.shutdown();
     Ok(())
 }
 

@@ -9,12 +9,13 @@ use ratatui::{
 };
 
 use crate::{
-    app::App,
+    app::{App, Run, RunPhase},
     project::{ParamRef, flatten_leaves, param_value},
+    runner::RunOutcome,
     stale::Status,
 };
 
-const HELP: &str = " j/k move   q quit      ✓ up to date  ● stale  ○ never run  ? unverified ";
+const HELP: &str = " j/k move  r run  R run+upstream  x cancel  PgUp/PgDn log  q quit    ✓ ok  ● stale  ○ never run  ? unverified ";
 /// Width of the label column in the detail pane ("depends", "metrics", ...).
 const LABEL_WIDTH: usize = 9;
 const WARNING: &str = "⚠";
@@ -28,8 +29,55 @@ pub fn view(app: &App, frame: &mut Frame) {
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(main);
 
     render_stage_list(app, frame, left);
-    render_detail(app, frame, right);
-    frame.render_widget(Paragraph::new(HELP).dim(), help);
+    match &app.run {
+        None => render_detail(app, frame, right),
+        Some(run) => {
+            let [top, bottom] =
+                Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(right);
+            render_detail(app, frame, top);
+            render_log(run, frame, bottom);
+        }
+    }
+    let footer = match &app.notice {
+        Some(notice) => Paragraph::new(format!(" {notice} ")).style(Style::new().fg(Color::Yellow)),
+        None => Paragraph::new(HELP).dim(),
+    };
+    frame.render_widget(footer, help);
+}
+
+fn render_log(run: &Run, frame: &mut Frame, area: ratatui::layout::Rect) {
+    let (phase_text, color) = match &run.phase {
+        RunPhase::Running => ("running…".to_owned(), Color::Cyan),
+        RunPhase::Cancelling => ("cancelling…".to_owned(), Color::Yellow),
+        RunPhase::Finished(RunOutcome::Succeeded) => ("✓ succeeded".to_owned(), Color::Green),
+        RunPhase::Finished(RunOutcome::Failed { code: Some(code) }) => {
+            (format!("✗ failed (exit {code})"), Color::Red)
+        }
+        RunPhase::Finished(RunOutcome::Failed { code: None }) => {
+            ("✗ failed (ended by a signal)".to_owned(), Color::Red)
+        }
+        RunPhase::Finished(RunOutcome::Cancelled) => ("cancelled".to_owned(), Color::Yellow),
+        RunPhase::Finished(RunOutcome::NotStarted(_)) => ("✗ not started".to_owned(), Color::Red),
+    };
+    let scrolled = if run.scroll > 0 {
+        format!(" · {} lines back", run.scroll)
+    } else {
+        String::new()
+    };
+    let title = format!(" {} · {phase_text}{scrolled} ", run.command_line());
+
+    // Show the window of lines that ends `scroll` lines above the bottom.
+    let visible_rows = usize::from(area.height.saturating_sub(2));
+    let all: Vec<&str> = run.log.lines().collect();
+    let end = all.len().saturating_sub(run.scroll);
+    let start = end.saturating_sub(visible_rows);
+    let text = all[start..end].join("\n");
+
+    let block = Block::bordered()
+        .title(title)
+        .border_style(Style::new().fg(color));
+    frame.render_widget(Paragraph::new(text).block(block), area);
 }
 
 fn render_stage_list(app: &App, frame: &mut Frame, area: ratatui::layout::Rect) {
@@ -181,7 +229,11 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
-    use crate::test_support::{app_at, app_with_files, demo_app, fixture, with_statuses};
+    use crate::{
+        app::{Run, RunPhase},
+        runner::RunOutcome,
+        test_support::{app_at, app_with_files, demo_app, fixture, with_statuses},
+    };
 
     /// Draw into an in-memory terminal and return its rows as plain text.
     fn render(app: &App, width: u16, height: u16) -> Vec<String> {
@@ -342,5 +394,96 @@ mod tests {
     fn empty_project_shows_a_message_instead_of_crashing() {
         let (_dir, app) = app_with_files(&[("dvc.yaml", "stages: {}\n")]);
         assert!(screen(&app).contains("(no stages in dvc.yaml)"));
+    }
+
+    fn app_with_run(output: &str, phase: RunPhase) -> App {
+        let mut app = demo_app();
+        let mut run = Run::new("train".into(), false);
+        run.log.push_str(output);
+        run.phase = phase;
+        app.run = Some(run);
+        app
+    }
+
+    #[test]
+    fn running_log_shows_the_command_and_only_the_latest_progress_state() {
+        let app = app_with_run("start\nprogress 20%\rprogress 60%", RunPhase::Running);
+        let text = screen(&app);
+        assert!(
+            text.contains("dvc repro --single-item train · running…"),
+            "{text}"
+        );
+        assert!(text.contains("start"), "{text}");
+        assert!(text.contains("progress 60%"), "{text}");
+        assert!(!text.contains("progress 20%"), "{text}");
+        // The stage detail is still visible above the log.
+        assert!(text.contains("cmd      python3 src/prepare.py"), "{text}");
+    }
+
+    #[test]
+    fn finished_runs_show_their_outcome_in_the_log_title() {
+        let cases = [
+            (RunOutcome::Succeeded, "✓ succeeded"),
+            (RunOutcome::Failed { code: Some(2) }, "✗ failed (exit 2)"),
+            (
+                RunOutcome::Failed { code: None },
+                "✗ failed (ended by a signal)",
+            ),
+            (RunOutcome::Cancelled, "cancelled"),
+            (
+                RunOutcome::NotStarted("dvc not found".into()),
+                "✗ not started",
+            ),
+        ];
+        for (outcome, expected) in cases {
+            let app = app_with_run("x\n", RunPhase::Finished(outcome));
+            let text = screen(&app);
+            assert!(text.contains(expected), "{expected:?} missing in:\n{text}");
+        }
+        let cancelling = screen(&app_with_run("x\n", RunPhase::Cancelling));
+        assert!(cancelling.contains("cancelling…"));
+    }
+
+    #[test]
+    fn log_follows_the_tail_and_can_be_scrolled_back() {
+        let numbered: String = (1..=100).map(|i| format!("line {i}\n")).collect();
+        let mut app = app_with_run(&numbered, RunPhase::Finished(RunOutcome::Succeeded));
+        let text = screen(&app);
+        assert!(text.contains("line 100"), "{text}");
+        assert!(
+            !text.contains("line 1\n") && !text.contains("line 50"),
+            "{text}"
+        );
+
+        app.run.as_mut().unwrap().scroll = 40;
+        let text = screen(&app);
+        assert!(text.contains("line 60"), "{text}");
+        assert!(!text.contains("line 100"), "{text}");
+        assert!(text.contains("40 lines back"), "{text}");
+    }
+
+    #[test]
+    fn not_started_message_is_visible_in_the_log() {
+        let mut app = demo_app();
+        let mut run = Run::new("train".into(), false);
+        run.log.push_str("dvc not found. Looked in: here; there");
+        run.log.finish();
+        run.phase = RunPhase::Finished(RunOutcome::NotStarted("x".into()));
+        app.run = Some(run);
+        assert!(screen(&app).contains("Looked in: here; there"));
+    }
+
+    #[test]
+    fn footer_shows_a_notice_instead_of_the_key_help() {
+        let mut app = demo_app();
+        let rows = render(&app, 100, 20);
+        assert!(rows[19].contains("r run"), "{rows:#?}");
+        app.notice = Some("a run is already in progress".into());
+        let rows = render(&app, 100, 20);
+        assert!(
+            rows[19].contains("a run is already in progress"),
+            "{rows:#?}"
+        );
+        assert!(!rows[19].contains("r run"));
     }
 }

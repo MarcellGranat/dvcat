@@ -5,7 +5,7 @@ run a stage with a live log, and compare experiments. Written in Rust with [rata
 
 > **Status:** under construction. The change plan lives in `openspec/changes/add-dvc-tui/`.
 > Features below are marked *(planned)* until they are implemented.
-> Working today: pipeline list, detail pane, stale detection with reasons.
+> Working today: pipeline list, detail pane, stale detection with reasons, running and cancelling stages.
 
 ## Run
 
@@ -14,6 +14,7 @@ cargo run -- [PROJECT_DIR]      # PROJECT_DIR defaults to the current directory
 ```
 
 `dvc` is looked up in `$DVC_TUI_DVC`, then `<PROJECT_DIR>/.venv/bin/dvc`, then `PATH`.
+If none is found, pressing `r` explains where it looked.
 
 ## Keys
 
@@ -21,9 +22,10 @@ cargo run -- [PROJECT_DIR]      # PROJECT_DIR defaults to the current directory
 |------------|------------------------------------------|
 | `j` / `k`  | move selection down / up                 |
 | `q`        | quit                                     |
-| `r` *(planned)* | run selected stage only (`dvc repro --single-item`) |
-| `R` *(planned)* | run selected stage with stale upstream (`dvc repro`) |
-| `x` *(planned)* | cancel the running stage            |
+| `r`        | run the selected stage only (`dvc repro --single-item`) |
+| `R`        | run it with stale upstream stages (`dvc repro`) |
+| `x`        | cancel the running stage                 |
+| `PgUp` / `PgDn` | scroll the log                      |
 | `e` *(planned)* | experiments view                    |
 | `F5` *(planned)* | refresh experiments                |
 

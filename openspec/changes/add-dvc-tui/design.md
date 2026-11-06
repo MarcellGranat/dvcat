@@ -46,8 +46,11 @@ Stages are stored in a `Vec`, edges are `Vec<Vec<usize>>` (dependencies by index
 ### 6. Locating `dvc`
 Resolution order: `DVC_TUI_DVC` env var, `<project>/.venv/bin/dvc`, then `PATH`. Failure lists the places searched.
 
+### 1b. Side effects as data
+`update` returns `Vec<Effect>` (`StartRun`, `CancelRun`, `RefreshStatuses`) instead of performing I/O; `App::dispatch` executes them. Key handling and the single-run rule are therefore testable without spawning anything, and tests inject a fake `dvc` through a `dvc_lookup` function pointer rather than process-wide environment variables.
+
 ### 7. Process control
-Spawn with piped stdout and stderr, merged by two reader threads into one event stream. Lines are split on `\n` and `\r`, and a `\r`-terminated line replaces the previous log line instead of appending. The child is started in its own process group so cancel and quit can signal the whole group (`SIGTERM`, then `SIGKILL` after a timeout); this needs the `libc` crate or `std::os::unix::process::CommandExt::process_group`, the latter preferred to avoid a dependency (Unix only in v1).
+Spawn with piped stdout and stderr, merged by two reader threads into one event stream. Lines are split on `\n` and `\r`, and a `\r`-terminated line replaces the previous log line instead of appending. The child is started in its own process group so cancel and quit can signal the whole group (`SIGTERM`, then `SIGKILL` after a timeout); `CommandExt::process_group(0)` creates the group. The standard library cannot signal a group, so the `kill -s <SIG> -- -<pgid>` program is used (no `libc`, no `unsafe`). The child gets `PYTHONUNBUFFERED=1` so piped Python stages stream output instead of buffering until exit.
 *Alternatives:* a PTY (faithful progress bars, but heavy); `--quiet` only (loses information).
 
 ### 8. Experiments parsing
@@ -80,11 +83,14 @@ tests/fixtures/  throwaway three-stage DVC repo
 - [Our md5 differs from DVC's for text files with CRLF line endings, since DVC normalises them] → Known gap: such a dep may show as changed; `tests/dvc_cross_check.rs` is the guard, and a later task can add normalisation.
 - [Modified or missing *outputs* are not checked, though `dvc status` reports them] → Out of scope for v1; the stage view says "up to date" about inputs only.
 - [Propagating staleness downstream is conservative: `dvc repro` skips a downstream stage if the upstream output turns out unchanged] → Intentional per spec; the reason text says "upstream: <stage>".
+- [DVC spawns a detached `dvc daemon analytics` process after commands] → Not ours to manage; it appears after a plain `dvc status` as well. Users can set `DVC_NO_ANALYTICS=1`.
 - [Unix-only process groups] → Documented v1 limitation.
 - [`foreach`/`matrix` stages, `vars`, `${}` interpolation] → Not expanded in v1; such stages are shown as-is and flagged unsupported.
 - [Large `dvc.lock` or many stages] → Hashing runs off the UI thread; results arrive as events.
 
 ## Open Questions
+
+- Cancel sends SIGTERM, then SIGKILL after 3 s. In ~20 cancel trials against real DVC (both TERM and INT, at varied moments) `dvc.lock` always stayed valid, but one early manual run showed `'./dvc.lock' validation failed` on the next run after a cancel and could not be reproduced. If it recurs, switch to an INT → TERM → KILL ladder (INT is what Ctrl+C in a terminal sends and lets DVC and user code clean up).
 
 - ~~Which YAML crate to use~~ Resolved: `serde_norway` (maintained fork of the archived `serde_yaml`, same API).
 - Whether `x` (cancel) should ask for confirmation.

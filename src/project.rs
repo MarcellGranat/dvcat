@@ -132,6 +132,15 @@ impl Project {
     }
 }
 
+impl Project {
+    /// Re-read what a run can change (`dvc.lock` and the param files). Stages stay as loaded.
+    pub fn reload_state(&mut self) -> Result<()> {
+        self.lock = Lock::load(&self.root.join(DVC_LOCK))?;
+        self.params = load_all_param_files(&self.root, &self.stages);
+        Ok(())
+    }
+}
+
 fn load_all_param_files(root: &Path, stages: &[Stage]) -> BTreeMap<String, Result<Value, String>> {
     stages
         .iter()
@@ -460,6 +469,27 @@ stages:
         let articleiv = Project::load(&fixture("articleiv")).unwrap();
         let tree = articleiv.params["params.json"].as_ref().unwrap();
         assert_eq!(param_value(tree, "download.limit"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn reload_state_picks_up_a_changed_lock_and_params() {
+        let dir = tempfile::tempdir().unwrap();
+        copy_demo(dir.path());
+        let mut project = Project::load(dir.path()).unwrap();
+        assert!(project.lock.stages.contains_key("train"));
+
+        fs::remove_file(dir.path().join(DVC_LOCK)).unwrap();
+        fs::write(dir.path().join("params.yaml"), "train:\n  lr: 9\n").unwrap();
+        project.reload_state().unwrap();
+        assert!(project.lock.stages.is_empty());
+        let tree = project.params["params.yaml"].as_ref().unwrap();
+        assert_eq!(param_value(tree, "train.lr"), Some(&serde_json::json!(9)));
+    }
+
+    fn copy_demo(dst: &Path) {
+        for name in ["dvc.yaml", "dvc.lock", "params.yaml"] {
+            fs::copy(fixture("demo").join(name), dst.join(name)).unwrap();
+        }
     }
 
     #[test]
