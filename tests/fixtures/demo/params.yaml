@@ -1,0 +1,5 @@
+features:
+  scale: 2.0
+train:
+  lr: 0.01
+  epochs: 5

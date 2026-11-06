@@ -4,15 +4,15 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 
 ## 1. Project skeleton and test fixture
 
-- [ ] 1.1 Create the cargo binary `dvc_tui` with the dependencies from design decision 9; verify `cargo build` succeeds and `cargo run` prints a placeholder
-- [ ] 1.2 Create `tests/fixtures/demo/`, a throwaway three-stage DVC repo (`prepare` → `features` → `train`) with `params.yaml` and a metrics file, plus a script that regenerates its `dvc.lock`; verify `dvc status` and `dvc repro` run cleanly inside it
-- [ ] 1.3 Add a minimal `README.md` with run instructions and key bindings; verify the documented commands work as written
+- [x] 1.1 Create the cargo binary `dvc_tui` with the dependencies from design decision 9; verify `cargo build` succeeds and `cargo run` prints a placeholder
+- [x] 1.2 Create `tests/fixtures/demo/`, a throwaway three-stage DVC repo (`prepare` → `features` → `train`) with `params.yaml` and a metrics file, plus a script that regenerates its `dvc.lock`; verify `dvc status` and `dvc repro` run cleanly inside it
+- [x] 1.3 Add a minimal `README.md` with run instructions and key bindings; verify the documented commands work as written
 
 ## 2. Terminal loop and event plumbing
 
-- [ ] 2.1 Implement terminal setup/teardown with a panic hook and drop guard; verify via a test or manual check that the terminal is restored after `q` and after a forced panic (spec: pipeline-view, quit and help)
-- [ ] 2.2 Implement the `Event` enum, `mpsc` channel, key-forwarding thread and `recv_timeout` main loop with `update`/`view` split; verify `q` quits and the screen shows the key-binding help line
-- [ ] 2.3 Unit-test `update` for key events (quit, selection movement) without a terminal; verify `cargo test` passes
+- [x] 2.1 Implement terminal setup/teardown with a panic hook and drop guard; verify via a test or manual check that the terminal is restored after `q` and after a forced panic (spec: pipeline-view, quit and help)
+- [x] 2.2 Implement the `Event` enum, `mpsc` channel, key-forwarding thread and `recv_timeout` main loop with `update`/`view` split; verify `q` quits and the screen shows the key-binding help line
+- [x] 2.3 Unit-test `update` for key events (quit, selection movement) without a terminal; verify `cargo test` passes
 
 ## 3. Loading the pipeline
 

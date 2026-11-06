@@ -1,0 +1,70 @@
+mod app;
+mod ui;
+
+use std::{
+    sync::mpsc::{self, RecvTimeoutError, Sender},
+    thread,
+    time::Duration,
+};
+
+use anyhow::Result;
+use ratatui::{
+    DefaultTerminal,
+    crossterm::event::{self, Event as TermEvent, KeyEventKind},
+};
+
+use app::{App, Event};
+
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Restores the terminal when dropped: on normal exit, on `?` early return, and during panics.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        ratatui::restore();
+    }
+}
+
+fn main() -> Result<()> {
+    // `init` enters raw mode + the alternate screen and installs a panic hook that restores them.
+    let mut terminal = ratatui::init();
+    let _guard = TerminalGuard; // lives until the end of `main`, then `drop` runs
+    run(&mut terminal)
+}
+
+fn run(terminal: &mut DefaultTerminal) -> Result<()> {
+    let (tx, rx) = mpsc::channel();
+    spawn_key_thread(tx); // `tx` is *moved* into the function: we can't use it here any more
+
+    // Placeholder data until the real pipeline loads (group 3).
+    let mut app = App::new(vec!["prepare".into(), "features".into(), "train".into()]);
+
+    while !app.should_quit {
+        // The closure borrows `app` immutably; the borrow ends when `draw` returns...
+        terminal.draw(|frame| ui::view(&app, frame))?;
+        // ...so we may borrow it mutably here.
+        match rx.recv_timeout(POLL_INTERVAL) {
+            Ok(event) => app.update(event),
+            Err(RecvTimeoutError::Timeout) => {} // nothing happened; just redraw
+            Err(RecvTimeoutError::Disconnected) => break, // the key thread died
+        }
+    }
+    Ok(())
+}
+
+/// Forward key presses from the terminal into our event channel.
+fn spawn_key_thread(tx: Sender<Event>) {
+    thread::spawn(move || {
+        // `read` blocks until something happens, which is why this lives on its own thread.
+        while let Ok(term_event) = event::read() {
+            // Some terminals report both press and release; only act on presses.
+            if let TermEvent::Key(key) = term_event
+                && key.kind == KeyEventKind::Press
+                && tx.send(Event::Key(key)).is_err()
+            {
+                break; // receiver is gone: the app is shutting down
+            }
+        }
+    });
+}

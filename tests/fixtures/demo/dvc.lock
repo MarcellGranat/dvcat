@@ -1,0 +1,61 @@
+schema: '2.0'
+stages:
+  prepare:
+    cmd: python3 src/prepare.py
+    deps:
+    - path: data/raw.csv
+      hash: md5
+      md5: c3cf4fc75063370444f0f8f0b4b08f52
+      size: 24
+    - path: src/prepare.py
+      hash: md5
+      md5: 8f78a1e8ccb544770dc836ec50cf3a0c
+      size: 305
+    outs:
+    - path: data/prepared.csv
+      hash: md5
+      md5: dfdad34f8eaeda9888ec525088f967ee
+      size: 26
+  features:
+    cmd: python3 src/features.py
+    deps:
+    - path: data/prepared.csv
+      hash: md5
+      md5: dfdad34f8eaeda9888ec525088f967ee
+      size: 26
+    - path: src/features.py
+      hash: md5
+      md5: 8147432ddacc87b377a4abb7d053dedc
+      size: 407
+    params:
+      params.yaml:
+        features.scale: 2.0
+    outs:
+    - path: data/features.csv
+      hash: md5
+      md5: 2ef9d879f34fc9774052230fea6e708d
+      size: 52
+  train:
+    cmd: python3 src/train.py
+    deps:
+    - path: data/features.csv
+      hash: md5
+      md5: 2ef9d879f34fc9774052230fea6e708d
+      size: 52
+    - path: src/train.py
+      hash: md5
+      md5: 83619645c03d8610257c037f121a62f2
+      size: 627
+    params:
+      params.yaml:
+        train.epochs: 5
+        train.lr: 0.01
+    outs:
+    - path: metrics.json
+      hash: md5
+      md5: 18d810a9dad016500ad4028d36e60f08
+      size: 31
+    - path: model.txt
+      hash: md5
+      md5: d02ae1e714dc5a99bd310f323ba57cb5
+      size: 17

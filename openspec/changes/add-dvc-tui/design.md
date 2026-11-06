@@ -81,5 +81,5 @@ tests/fixtures/  throwaway three-stage DVC repo
 
 ## Open Questions
 
-- Which YAML crate to use at implementation time (the original `serde_yaml` is archived).
+- ~~Which YAML crate to use~~ Resolved: `serde_norway` (maintained fork of the archived `serde_yaml`, same API).
 - Whether `x` (cancel) should ask for confirmation.

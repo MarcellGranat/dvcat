@@ -1,0 +1,30 @@
+stages:
+  prepare:
+    cmd: python3 src/prepare.py
+    deps:
+      - src/prepare.py
+      - data/raw.csv
+    outs:
+      - data/prepared.csv
+  features:
+    cmd: python3 src/features.py
+    deps:
+      - src/features.py
+      - data/prepared.csv
+    params:
+      - features.scale
+    outs:
+      - data/features.csv
+  train:
+    cmd: python3 src/train.py
+    deps:
+      - src/train.py
+      - data/features.csv
+    params:
+      - train.lr
+      - train.epochs
+    outs:
+      - model.txt
+    metrics:
+      - metrics.json:
+          cache: false
