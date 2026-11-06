@@ -77,3 +77,7 @@ The system SHALL show how long a run has taken, live while it is active and fixe
 - **WHEN** a stage has not been run from the interface, or its run never started
 - **THEN** no last-run line is shown for it
 
+#### Scenario: Skipped stage
+- **WHEN** DVC skips the requested stage because nothing changed
+- **THEN** that run is not recorded as the stage's last run, and an earlier record is kept; a skipped upstream stage does not affect the requested stage's record
+

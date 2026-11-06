@@ -89,6 +89,7 @@ The cursor is shared with the pipeline view (the same stage stays selected), and
 The log title shows how long a run has taken (live while it runs, fixed afterwards), and a stage's detail pane has a
 `last run` line with the outcome and duration of its latest run from this session. DVC itself keeps no durations, so
 runs made outside the interface, or before it was opened, have none.
+A run in which DVC only reports `Stage '<name>' didn't change, skipping` is not recorded, since nothing ran.
 
 ## Templated stages
 

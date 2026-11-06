@@ -172,6 +172,13 @@ pub struct LastRun {
 }
 
 impl Run {
+    /// Did DVC skip the requested stage because nothing changed? (It says so in the log.)
+    /// Upstream stages that were skipped do not matter: only the stage that was asked for.
+    fn skipped_target(&self) -> bool {
+        let message = format!("Stage '{}' didn't change, skipping", self.stage);
+        self.log.lines().any(|line| line.contains(&message))
+    }
+
     /// Time since the run started, or its final duration once it has ended.
     pub fn duration(&self) -> Duration {
         self.elapsed.unwrap_or_else(|| self.started.elapsed())
@@ -794,7 +801,9 @@ impl App {
         let succeeded = outcome == RunOutcome::Succeeded;
         let duration = run.started.elapsed();
         run.elapsed = Some(duration);
-        if kind == RunKind::Stage && !matches!(outcome, RunOutcome::NotStarted(_)) {
+        // A run in which DVC only said "didn't change, skipping" did nothing, so it is no "last run".
+        let skipped = run.skipped_target();
+        if kind == RunKind::Stage && !skipped && !matches!(outcome, RunOutcome::NotStarted(_)) {
             let stage = run.stage.clone();
             self.last_runs.insert(
                 stage,
@@ -2105,6 +2114,60 @@ mod experiments_view_tests {
         h.app
             .update(Event::RunFinished(RunOutcome::NotStarted("no dvc".into())));
         assert!(h.app.last_runs.is_empty());
+    }
+
+    #[test]
+    fn a_run_that_dvc_skipped_leaves_no_last_run() {
+        let mut h = harness("echo \"Stage 'a' didn't change, skipping\"");
+        h.press(KeyCode::Char('r'));
+        wait_until_finished(&mut h);
+        assert_eq!(
+            h.app.run.as_ref().unwrap().phase,
+            RunPhase::Finished(RunOutcome::Succeeded)
+        );
+        assert!(h.app.last_runs.is_empty(), "{:?}", h.app.last_runs);
+    }
+
+    #[test]
+    fn a_skipped_run_keeps_the_previous_record_of_the_stage() {
+        let mut h = harness("echo running; sleep 0.1");
+        h.press(KeyCode::Char('r'));
+        wait_until_finished(&mut h);
+        let before = h.app.last_runs["a"].clone();
+        // The next run only skips.
+        let script = h.dir.path().join("fake-dvc");
+        fs::write(
+            &script,
+            "#!/bin/sh\necho \"Stage 'a' didn't change, skipping\"\n",
+        )
+        .unwrap();
+        h.press(KeyCode::Char('r'));
+        wait_until_finished(&mut h);
+        assert_eq!(h.app.last_runs["a"], before);
+    }
+
+    #[test]
+    fn only_the_requested_stage_counts_not_skipped_upstream_ones() {
+        let mut h = harness(
+            "echo \"Stage 'up' didn't change, skipping\"; echo \"Running stage 'a':\"; sleep 0.1",
+        );
+        h.press(KeyCode::Char('R'));
+        wait_until_finished(&mut h);
+        assert!(
+            h.app.last_runs.contains_key("a"),
+            "a ran, even though its upstream was skipped"
+        );
+    }
+
+    #[test]
+    fn a_failed_run_is_recorded_even_if_the_log_mentions_other_skips() {
+        let mut h = harness("echo \"Stage 'up' didn't change, skipping\"; exit 1");
+        h.press(KeyCode::Char('R'));
+        wait_until_finished(&mut h);
+        assert_eq!(
+            h.app.last_runs["a"].outcome,
+            RunOutcome::Failed { code: Some(1) }
+        );
     }
 }
 
