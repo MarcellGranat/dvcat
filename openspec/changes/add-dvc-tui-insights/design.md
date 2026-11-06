@@ -48,7 +48,14 @@ A small `Prompt` modal (title, one text field, validation error) reuses the fiel
 `dag::layout(&Graph, labels)` assigns each stage a layer (longest path from a source), orders layers with one barycenter sweep, and replaces every edge that skips layers by a chain of one-row virtual nodes, so each drawn edge crosses exactly one gap between adjacent layers. Rows are 4 cells apart per node; a gap's vertical tracks are allocated greedily so overlapping edges get different tracks. Lines are written into a canvas whose cells hold direction bits (up/down/left/right) and are converted to `─│┌┐└┘├┤┬┴┼`, so crossings and junctions come out right; boxes and arrowheads are drawn on top. The result is `Layout { nodes, canvas, width, height }`, pure and golden-testable. The view scrolls a viewport to keep the cursor visible; navigation uses layer and row neighbours. `Enter` selects the stage and returns to the pipeline view; `r`/`R` reuse the existing run requests.
 *Alternatives:* `dvc dag --dot` plus Graphviz (external dependency, not terminal-native); a plain indented tree (loses joins); `petgraph` layouts (no terminal drawing, new dependency).
 
-### 7. Order of work
+### 7. Run times: session records, a history file, a column next to the name
+DVC stores no durations, so the app times the runs it starts (`Run` keeps its start `Instant`) and remembers the latest finished run of each stage (`LastRun`, skipped and never-started runs excluded) and the duration of each `exp run` by the experiment name DVC prints in `Ran experiment(s): <names>` (so generated names work too; apply/remove/branch and failed runs record nothing). `main` calls `App::enable_history`, which loads and later saves `.dvc/tmp/dvc-tui-history.json` (`history.rs`); tests never enable it, so fixtures are never written. The stage list appends the time right-aligned when it fits. Experiments get `Row::run_secs`, filled when a table arrives, and a `Column::Duration` placed right after the name because the name column is the only one that never scrolls out of a narrow terminal; the column exists only when some row has a time, so tables without times, and the cursor positions of the other columns, are unchanged.
+*Alternatives:* reading times from `dvc.lock` (not recorded there); `dvc exp show` timestamps (creation time only, not duration); a column at the far right (scrolls out of view, which is what the user complained about).
+
+### 8. Numbered views
+`1`/`2`/`3` switch views directly and the header shows them, because the tab labels looked clickable and `g` was not mentioned in the footer. They are ignored while a popup is open, like every other global key.
+
+### 9. Order of work
 Expansion first (it changes which stages exist, so later features see them), then the output check, then the experiments features (diff, plot, branch), then the DAG, which depends on the final stage list and status colours.
 
 ## Risks / Trade-offs

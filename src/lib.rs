@@ -8,6 +8,7 @@ pub mod experiments;
 pub mod files;
 pub mod form;
 pub mod graph;
+pub mod history;
 pub mod log;
 pub mod plot;
 pub mod project;

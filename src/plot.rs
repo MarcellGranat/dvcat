@@ -163,6 +163,7 @@ mod tests {
             params: BTreeMap::from([("p:lr".to_owned(), lr)]),
             metrics: BTreeMap::from([("m:auc".to_owned(), auc)]),
             error: None,
+            run_secs: None,
         }
     }
 

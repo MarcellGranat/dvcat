@@ -43,6 +43,7 @@ If none is found, pressing `r` explains where it looked.
 | `R`        | run it with stale upstream stages (`dvc repro`) |
 | `x`        | cancel the running stage (from either view) |
 | `PgUp` / `PgDn` | scroll the log                      |
+| `1` `2` `3` | pipeline / graph / experiments view (also `g` for the graph, `e` for the experiments) |
 | `e`        | switch between the pipeline and the experiments table |
 | `g`        | show the stage graph (`g` or `Esc` to leave); `h`/`l` follow the edges, `j`/`k` move within a layer, `Enter` opens the stage, `r`/`R` run it |
 | `h` / `l`  | *(experiments)* move the column cursor   |
@@ -88,7 +89,9 @@ The cursor is shared with the pipeline view (the same stage stays selected), and
 
 The log title shows how long a run has taken (live while it runs, fixed afterwards), and a stage's detail pane has a
 `last run` line with the outcome and duration of its latest run from this session. DVC itself keeps no durations, so
-runs made outside the interface, or before it was opened, have none.
+runs made outside the interface, or before it was opened, have none. The times are also in the stage list (right-aligned)
+and, for experiments run from the form, in a `run time` column next to the name. They are remembered between sessions in
+`.dvc/tmp/dvc-tui-history.json` (inside DVC's own, Git-ignored tmp directory).
 A run in which DVC only reports `Stage '<name>' didn't change, skipping` is not recorded, since nothing ran.
 
 ## Templated stages

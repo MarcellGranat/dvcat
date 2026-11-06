@@ -54,7 +54,9 @@ fn main() -> Result<()> {
     // `init` enters raw mode + the alternate screen and installs a panic hook that restores them.
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard; // lives until the end of `main`, then `drop` runs
-    run(&mut terminal, App::new(project, graph))
+    let mut app = App::new(project, graph);
+    app.enable_history();
+    run(&mut terminal, app)
 }
 
 fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {

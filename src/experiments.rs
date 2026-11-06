@@ -17,7 +17,7 @@ use std::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::project::flatten_leaves;
+use crate::{history::format_duration, project::flatten_leaves};
 
 const SHORT_REV_LEN: usize = 7;
 
@@ -78,6 +78,8 @@ pub struct Row {
     pub metrics: BTreeMap<String, Value>,
     /// Set when DVC could not read this revision.
     pub error: Option<String>,
+    /// How long the experiment took to run, when this interface ran it (DVC does not record it).
+    pub run_secs: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -85,6 +87,8 @@ pub enum Column {
     Name,
     Param(String),
     Metric(String),
+    /// How long the experiment took; shown only when at least one row has a time.
+    Duration,
 }
 
 impl Column {
@@ -92,6 +96,7 @@ impl Column {
     pub fn title(&self) -> &str {
         match self {
             Column::Name => "name",
+            Column::Duration => "run time",
             Column::Param(label) | Column::Metric(label) => label,
         }
     }
@@ -176,6 +181,7 @@ fn row_from(
         params: leaves_by_file(data.params.unwrap_or_default()),
         metrics: leaves_by_file(data.metrics.unwrap_or_default()),
         error: error.as_ref().map(error_text),
+        run_secs: None,
     }
 }
 
@@ -206,6 +212,13 @@ impl Table {
     /// `name`, then every param column, then every metric column.
     pub fn columns(&self) -> Vec<Column> {
         std::iter::once(Column::Name)
+            // Next to the name, which is always on screen; at the far right it would scroll out of sight.
+            .chain(
+                self.rows
+                    .iter()
+                    .any(|row| row.run_secs.is_some())
+                    .then_some(Column::Duration),
+            )
             .chain(self.param_columns.iter().cloned().map(Column::Param))
             .chain(self.metric_columns.iter().cloned().map(Column::Metric))
             .collect()
@@ -256,6 +269,10 @@ pub fn cell_text(row: &Row, column: &Column) -> String {
         Column::Name => row.label.clone(),
         Column::Param(label) => row.params.get(label).map(display).unwrap_or_default(),
         Column::Metric(label) => row.metrics.get(label).map(display).unwrap_or_default(),
+        Column::Duration => row
+            .run_secs
+            .map(|secs| format_duration(Duration::from_secs_f64(secs)))
+            .unwrap_or_default(),
     }
 }
 
@@ -378,6 +395,7 @@ enum SortValue {
 fn sort_value(row: &Row, column: &Column) -> Option<SortValue> {
     let value = match column {
         Column::Name => return Some(SortValue::Text(row.label.clone())),
+        Column::Duration => return row.run_secs.map(SortValue::Number),
         Column::Param(label) => row.params.get(label)?,
         Column::Metric(label) => row.metrics.get(label)?,
     };
@@ -662,6 +680,7 @@ mod tests {
             params: BTreeMap::new(),
             metrics: BTreeMap::new(),
             error: None,
+            run_secs: None,
         }];
         for (name, value) in values {
             let mut params = BTreeMap::new();
@@ -676,6 +695,7 @@ mod tests {
                 params,
                 metrics: BTreeMap::new(),
                 error: None,
+                run_secs: None,
             });
         }
         Table {
@@ -870,6 +890,7 @@ mod tests {
             params: BTreeMap::from([("p:lr".to_owned(), json!(0.01))]),
             metrics: BTreeMap::from([("m:auc".to_owned(), auc)]),
             error: None,
+            run_secs: None,
         }
     }
 
@@ -947,5 +968,49 @@ mod tests {
         assert_eq!(metric_delta(&exp, &base, "m:other"), None);
         let base_text = metric_row(RowKind::Baseline, "main", json!(null));
         assert_eq!(metric_delta(&exp, &base_text, "m:auc"), None);
+    }
+
+    // ---- run time column ----
+
+    #[test]
+    fn the_run_time_column_sits_next_to_the_name_and_only_when_a_time_is_known() {
+        let mut table = numbers(&[("a", json!(1)), ("b", json!(2))]);
+        assert!(!table.columns().contains(&Column::Duration));
+        table.rows[1].run_secs = Some(4.2);
+        let columns = table.columns();
+        assert_eq!(columns[1], Column::Duration);
+        assert_eq!(Column::Duration.title(), "run time");
+        assert_eq!(cell_text(&table.rows[1], &Column::Duration), "4.2s");
+        assert_eq!(cell_text(&table.rows[2], &Column::Duration), "");
+    }
+
+    #[test]
+    fn run_times_sort_numerically_with_unknown_ones_last() {
+        let mut table = numbers(&[("slow", json!(1)), ("none", json!(2)), ("fast", json!(3))]);
+        table.rows[1].run_secs = Some(120.0); // slow
+        table.rows[3].run_secs = Some(9.0); // fast
+        let mut sort = Sort::default();
+        sort.choose(Column::Duration);
+        let labels: Vec<&str> = table
+            .ordered(&sort)
+            .iter()
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            ["base", "fast", "slow", "none"],
+            "9s before 2m, unknown last"
+        );
+        sort.choose(Column::Duration);
+        let labels: Vec<&str> = table
+            .ordered(&sort)
+            .iter()
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            ["base", "slow", "fast", "none"],
+            "descending keeps unknown last"
+        );
     }
 }

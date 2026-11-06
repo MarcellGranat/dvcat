@@ -16,6 +16,7 @@ use crate::{
     files::{self, FileEntry, Preview},
     form::{ExperimentForm, FormAction},
     graph::Graph,
+    history::{self, History, StoredOutcome, StoredRun},
     log::LogBuffer,
     project::{Project, Stage},
     prompt::{Prompt, PromptAction},
@@ -242,6 +243,10 @@ pub struct App {
     pub prompt: Option<Prompt>,
     /// The latest finished run of each stage started from this session (DVC keeps no durations).
     pub last_runs: BTreeMap<String, LastRun>,
+    /// Seconds each experiment took, by name, for the experiments table.
+    pub experiment_times: BTreeMap<String, f64>,
+    /// Whether run times are read from and written to the project's history file (`main` turns it on).
+    persist_history: bool,
     /// Cursor in the files pane, an index into [`App::selected_files`].
     pub file_cursor: usize,
     /// The open preview popup, if any. While it is open it receives all keys.
@@ -273,12 +278,66 @@ impl App {
             confirm: None,
             prompt: None,
             last_runs: BTreeMap::new(),
+            experiment_times: BTreeMap::new(),
+            persist_history: false,
             file_cursor: 0,
             preview: None,
             editor_request: None,
             notice: None,
             dvc_lookup: runner::find_dvc_in_env,
             should_quit: false,
+        }
+    }
+
+    /// Load the run times remembered from earlier sessions and keep saving new ones.
+    /// Off by default, so tests never touch a fixture's `.dvc` directory.
+    pub fn enable_history(&mut self) {
+        let remembered = history::load(&self.project.root);
+        for (stage, run) in remembered.stages {
+            self.last_runs.insert(
+                stage,
+                LastRun {
+                    outcome: run.outcome.to_outcome(),
+                    duration: Duration::from_secs_f64(run.seconds),
+                },
+            );
+        }
+        self.experiment_times.extend(remembered.experiments);
+        self.persist_history = true;
+    }
+
+    fn save_history(&self) {
+        if !self.persist_history {
+            return;
+        }
+        let stages = self
+            .last_runs
+            .iter()
+            .filter_map(|(stage, run)| {
+                let outcome = StoredOutcome::from_outcome(&run.outcome)?;
+                Some((
+                    stage.clone(),
+                    StoredRun {
+                        outcome,
+                        seconds: run.duration.as_secs_f64(),
+                    },
+                ))
+            })
+            .collect();
+        let history = History {
+            stages,
+            experiments: self.experiment_times.clone(),
+        };
+        // A history that cannot be written is not worth interrupting the user for.
+        let _ = history::save(&self.project.root, &history);
+    }
+
+    /// Put the remembered experiment run times into a freshly loaded table.
+    fn apply_experiment_times(&self, table: &mut Table) {
+        for row in &mut table.rows {
+            if row.kind == RowKind::Experiment {
+                row.run_secs = self.experiment_times.get(&row.label).copied();
+            }
         }
     }
 
@@ -356,7 +415,10 @@ impl App {
                 self.preview = Some(preview);
                 Vec::new()
             }
-            Event::Experiments(result) => {
+            Event::Experiments(mut result) => {
+                if let Ok(table) = &mut result {
+                    self.apply_experiment_times(table);
+                }
                 self.experiments.loading = false;
                 self.experiments.data = Some(result);
                 self.clamp_experiments_cursor();
@@ -390,6 +452,15 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char('e') => self.toggle_view(),
+            KeyCode::Char('1') => {
+                self.view = View::Pipeline;
+                Vec::new()
+            }
+            KeyCode::Char('2') => {
+                self.view = View::Dag;
+                Vec::new()
+            }
+            KeyCode::Char('3') if self.view != View::Experiments => self.toggle_view(),
             KeyCode::Char('g') => {
                 self.view = if self.view == View::Dag {
                     View::Pipeline
@@ -813,6 +884,17 @@ impl App {
                 },
             );
         }
+        // `exp run` prints "Ran experiment(s): <names>"; those names get this run's duration.
+        let ran_experiments = match (&kind, run.args.get(1).map(String::as_str)) {
+            (RunKind::Experiment, Some("run")) if succeeded => {
+                history::experiments_named_in(run.log.lines().map(str::to_owned))
+            }
+            _ => Vec::new(),
+        };
+        for name in ran_experiments {
+            self.experiment_times.insert(name, duration.as_secs_f64());
+        }
+        self.save_history();
         let Some(run) = &mut self.run else {
             return Vec::new();
         };
@@ -2168,6 +2250,159 @@ mod experiments_view_tests {
             h.app.last_runs["a"].outcome,
             RunOutcome::Failed { code: Some(1) }
         );
+    }
+
+    // ----- run times of experiments, remembered between sessions -----
+
+    #[test]
+    fn number_keys_switch_views_directly() {
+        let mut h = with_table_loaded();
+        h.press(KeyCode::Char('1'));
+        assert_eq!(h.app.view, View::Pipeline);
+        h.press(KeyCode::Char('2'));
+        assert_eq!(h.app.view, View::Dag);
+        h.press(KeyCode::Char('3'));
+        assert_eq!(h.app.view, View::Experiments);
+        h.press(KeyCode::Char('3'));
+        assert_eq!(h.app.view, View::Experiments, "already there");
+        h.press(KeyCode::Char('2'));
+        h.press(KeyCode::Char('1'));
+        assert_eq!(h.app.view, View::Pipeline);
+    }
+
+    #[test]
+    fn digits_typed_into_a_form_do_not_switch_views() {
+        let mut h = with_table_loaded();
+        h.press(KeyCode::Char('n'));
+        h.press(KeyCode::Char('2'));
+        assert_eq!(h.app.view, View::Experiments);
+        assert!(h.app.form.as_ref().unwrap().name.ends_with('2'));
+    }
+
+    #[test]
+    fn an_experiment_run_records_its_time_under_the_name_dvc_reports() {
+        let mut h = harness(
+            "case \"$1\" in exp) [ \"$2\" = run ] && { echo 'Ran experiment(s): my-exp'; sleep 0.2; } ;; esac",
+        );
+        let json = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/exp_show/two.json");
+        let table = experiments::parse(&fs::read_to_string(json).unwrap()).unwrap();
+        h.app.experiments.data = Some(Ok(table));
+        h.app.view = View::Experiments;
+        h.press(KeyCode::Char('n'));
+        for c in "my-exp".chars() {
+            h.press(KeyCode::Char(c));
+        }
+        h.press(KeyCode::Enter);
+        wait_until_finished(&mut h);
+        let secs = h.app.experiment_times["my-exp"];
+        assert!(secs >= 0.15, "{secs}");
+    }
+
+    #[test]
+    fn apply_remove_and_branch_runs_record_no_experiment_time() {
+        let mut h = harness("echo 'Ran experiment(s): ghost'");
+        for args in [["exp", "apply", "x"], ["exp", "remove", "x"]] {
+            h.app.run = Some(Run::experiment("x".into(), args.map(String::from).into()));
+            h.app.update(Event::RunFinished(RunOutcome::Succeeded));
+        }
+        assert!(h.app.experiment_times.is_empty());
+    }
+
+    #[test]
+    fn a_failed_experiment_run_records_no_time() {
+        let mut h = harness("true");
+        let mut run = Run::experiment(
+            "exp x".into(),
+            ["exp", "run", "--temp"].map(String::from).into(),
+        );
+        run.log.push_str("Ran experiment(s): half\n");
+        h.app.run = Some(run);
+        h.app
+            .update(Event::RunFinished(RunOutcome::Failed { code: Some(1) }));
+        assert!(h.app.experiment_times.is_empty());
+    }
+
+    #[test]
+    fn a_loaded_table_gets_the_run_time_column_for_known_experiments_only() {
+        let mut h = serving_two();
+        h.app.experiment_times.insert("lr-005".into(), 12.5);
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+        let table = h.app.experiments.table().unwrap();
+        assert!(
+            table
+                .columns()
+                .contains(&crate::experiments::Column::Duration)
+        );
+        let secs = |label: &str| {
+            table
+                .rows
+                .iter()
+                .find(|r| r.label == label)
+                .unwrap()
+                .run_secs
+        };
+        assert_eq!(secs("lr-005"), Some(12.5));
+        assert_eq!(secs("lr-010"), None);
+        assert_eq!(secs("master"), None);
+    }
+
+    #[test]
+    fn without_any_known_time_there_is_no_run_time_column() {
+        let h = with_table_loaded();
+        let table = h.app.experiments.table().unwrap();
+        assert!(
+            !table
+                .columns()
+                .contains(&crate::experiments::Column::Duration)
+        );
+    }
+
+    #[test]
+    fn times_are_saved_on_every_finished_run_and_loaded_by_the_next_session() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".dvc")).unwrap();
+        fs::write(dir.path().join("dvc.yaml"), ONE_STAGE).unwrap();
+        let script = dir.path().join("fake-dvc");
+        fs::write(&script, "#!/bin/sh\nsleep 0.1\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut app = crate::test_support::app_at(dir.path());
+        app.dvc_lookup = |root| Ok(root.join("fake-dvc"));
+        app.enable_history();
+        let (tx, rx) = mpsc::channel();
+        app.dispatch(
+            Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            &tx,
+        );
+        let deadline = Instant::now() + WAIT;
+        while app.is_running() {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            app.dispatch(event, &tx);
+        }
+        app.experiment_times.insert("e1".into(), 7.0);
+        app.save_history();
+
+        let mut next = crate::test_support::app_at(dir.path());
+        assert!(next.last_runs.is_empty(), "history is opt-in");
+        next.enable_history();
+        assert_eq!(next.last_runs["a"].outcome, RunOutcome::Succeeded);
+        assert!(next.last_runs["a"].duration >= Duration::from_millis(80));
+        assert_eq!(next.experiment_times["e1"], 7.0);
+    }
+
+    #[test]
+    fn nothing_is_written_unless_history_was_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".dvc")).unwrap();
+        fs::write(dir.path().join("dvc.yaml"), ONE_STAGE).unwrap();
+        let mut app = crate::test_support::app_at(dir.path());
+        app.run = Some(Run::new("a".into(), false));
+        app.update(Event::RunFinished(RunOutcome::Succeeded));
+        assert!(!dir.path().join(".dvc/tmp").exists());
     }
 }
 

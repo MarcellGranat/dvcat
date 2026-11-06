@@ -1,7 +1,5 @@
 //! Drawing. Everything here takes `&App`: it can read state but never change it.
 
-use std::time::Duration;
-
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -17,6 +15,7 @@ use crate::{
     app::{App, Confirm, Focus, Run, RunPhase, View},
     files::{FileEntry, FileKind, Preview, PreviewBody},
     form::ExperimentForm,
+    history::format_duration,
     project::{ParamRef, flatten_leaves, param_value},
     prompt::Prompt,
     runner::RunOutcome,
@@ -35,6 +34,7 @@ const PIPELINE_KEYS: &[(&str, &str)] = &[
     ("R", "run+upstream"),
     ("x", "cancel"),
     ("PgUp/PgDn", "log"),
+    ("g", "graph"),
     ("e", "experiments"),
     ("q", "quit"),
 ];
@@ -44,6 +44,7 @@ const FILES_KEYS: &[(&str, &str)] = &[
     ("o", "editor"),
     ("Tab", "stages"),
     ("r", "run"),
+    ("g", "graph"),
     ("e", "experiments"),
     ("q", "quit"),
 ];
@@ -232,9 +233,9 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         }
     };
     let tabs = Line::from(vec![
-        tab("Pipeline", app.view == View::Pipeline),
-        tab("Graph", app.view == View::Dag),
-        tab("Experiments", app.view == View::Experiments),
+        tab("1 Pipeline", app.view == View::Pipeline),
+        tab("2 Graph (g)", app.view == View::Dag),
+        tab("3 Experiments (e)", app.view == View::Experiments),
     ]);
     // `Line::width` counts the displayed width, so the tabs hug the right edge.
     let [left_area, right_area] = Layout::horizontal([
@@ -284,20 +285,6 @@ fn outcome_label(outcome: &RunOutcome) -> (String, Color) {
     }
 }
 
-/// `850ms`, `4.2s`, `2m 05s`, `1h 02m`.
-pub fn format_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    if seconds >= 3600 {
-        format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60)
-    } else if seconds >= 60 {
-        format!("{}m {:02}s", seconds / 60, seconds % 60)
-    } else if seconds >= 1 {
-        format!("{:.1}s", duration.as_secs_f64())
-    } else {
-        format!("{}ms", duration.as_millis())
-    }
-}
-
 fn render_log(run: &Run, frame: &mut Frame, area: Rect) {
     let (phase_text, color) = match &run.phase {
         RunPhase::Running => ("running…".to_owned(), theme::SAPPHIRE),
@@ -337,6 +324,8 @@ fn render_log(run: &Run, frame: &mut Frame, area: Rect) {
 
 fn render_stage_list(app: &App, frame: &mut Frame, area: Rect) {
     let focused = app.focus == Focus::Stages;
+    // Inside the border and the two-cell selection marker.
+    let list_width = usize::from(area.width.saturating_sub(4));
     let items: Vec<ListItem> = (0..app.stage_count())
         .filter_map(|position| {
             let stage = app.stage_at(position)?;
@@ -346,10 +335,21 @@ fn render_stage_list(app: &App, frame: &mut Frame, area: Rect) {
             } else {
                 String::new()
             };
-            Some(ListItem::new(Line::from(vec![
+            let left = format!(" {}{warning}", stage.name);
+            let mut spans = vec![
                 Span::styled(glyph, Style::new().fg(color)),
-                Span::raw(format!(" {}{warning}", stage.name)),
-            ])))
+                Span::raw(left.clone()),
+            ];
+            // How long its last run took, right-aligned (when the pane is wide enough).
+            if let Some(last) = app.last_runs.get(&stage.name) {
+                let time = format_duration(last.duration);
+                let used = glyph.chars().count() + left.chars().count();
+                if let Some(gap) = list_width.checked_sub(used + time.chars().count() + 1) {
+                    spans.push(Span::raw(" ".repeat(gap + 1)));
+                    spans.push(Span::styled(time, theme::muted()));
+                }
+            }
+            Some(ListItem::new(Line::from(spans)))
         })
         .collect();
     let list = List::new(items)
@@ -1629,5 +1629,82 @@ mod tests {
         assert!(text.contains("last run ✗ failed (exit 2) · 4.2s"), "{text}");
         app.selected = 1; // another stage has no last run
         assert!(!screen(&app).contains("last run"));
+    }
+
+    #[test]
+    fn the_stage_list_shows_the_last_run_time_right_aligned_only_for_stages_that_have_one() {
+        use crate::app::LastRun;
+        let mut app = demo_app();
+        app.last_runs.insert(
+            "features".into(),
+            LastRun {
+                outcome: RunOutcome::Succeeded,
+                duration: std::time::Duration::from_millis(3_200),
+            },
+        );
+        let rows = render(&app, 100, 20);
+        // The stage list is the left 35 columns of the screen.
+        let left = |name: &str| -> String {
+            rows.iter()
+                .find(|r| r.contains(name))
+                .unwrap()
+                .chars()
+                .take(35)
+                .collect()
+        };
+        let features = left("features");
+        assert!(
+            features.trim_end_matches('│').trim_end().ends_with("3.2s"),
+            "{features:?}"
+        );
+        assert!(features.find("features").unwrap() < features.find("3.2s").unwrap());
+        assert!(
+            !left("prepare").contains("ms") && !left("prepare").contains("s │"),
+            "{:?}",
+            left("prepare")
+        );
+        assert_eq!(
+            rows.join("\n").matches("3.2s").count(),
+            1,
+            "only one time on screen"
+        );
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_the_time_drops_it_instead_of_overflowing() {
+        use crate::app::LastRun;
+        let mut app = demo_app();
+        app.last_runs.insert(
+            "features".into(),
+            LastRun {
+                outcome: RunOutcome::Succeeded,
+                duration: std::time::Duration::from_secs(125),
+            },
+        );
+        for width in [12, 20, 30] {
+            let _ = render(&app, width, 12); // never panics
+        }
+        let narrow = render(&app, 24, 12).join("\n");
+        assert!(
+            !narrow.contains("2m 05s") || narrow.contains("features"),
+            "{narrow}"
+        );
+    }
+
+    #[test]
+    fn the_header_numbers_the_views_and_the_footer_mentions_the_graph_key() {
+        let app = demo_app();
+        let rows = render(&app, 120, 20);
+        assert!(
+            rows[0].contains("1 Pipeline")
+                && rows[0].contains("2 Graph (g)")
+                && rows[0].contains("3 Experiments (e)"),
+            "{}",
+            rows[0]
+        );
+        assert!(rows[19].contains("g graph"), "{}", rows[19]);
+        let mut files = demo_app();
+        files.focus = Focus::Files;
+        assert!(render(&files, 120, 20)[19].contains("g graph"));
     }
 }

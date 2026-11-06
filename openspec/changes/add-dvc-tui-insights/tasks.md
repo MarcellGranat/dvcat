@@ -41,6 +41,13 @@
 - [x] 6.3 Add the `g` view: status colours, cursor navigation along edges and layers, scrolling, Enter to jump, `r`/`R` to run, empty-project state; verify `App` key tests and `TestBackend` tests
 - [x] 6.4 Manual pass on the demo and on `articleIVdb` (read-only) at several terminal sizes; update README keys and legend
 
+## 7a. Run times and view numbers
+
+- [x] 7a.1 Add `history.rs` (duration format, history file, `Ran experiment(s)` parsing); verify unit tests including damaged and absent files
+- [x] 7a.2 Show the last run time in the stage list; verify `TestBackend` tests (aligned, only where known, narrow pane) and a real run
+- [x] 7a.3 Add `Row::run_secs`, the `run time` column (next to the name, numeric sort), recording from `exp run` and persistence across sessions; verify unit and fake-`dvc` tests and a real run, quit and reopen
+- [x] 7a.4 Number the views (`1`/`2`/`3`) in the header and add `g graph` to the footer; verify key tests including digits typed into a form
+
 ## 7. Integration and wrap-up
 
 - [x] 7.1 End-to-end pass on the Git demo and a templated fixture covering every scenario in the six specs by checklist; fix gaps found

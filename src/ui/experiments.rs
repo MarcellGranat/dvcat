@@ -251,6 +251,7 @@ fn header_color(column: &Column) -> Color {
         Column::Name => theme::TEXT,
         Column::Param(_) => theme::PEACH,
         Column::Metric(_) => theme::GREEN,
+        Column::Duration => theme::SUBTEXT0,
     }
 }
 
