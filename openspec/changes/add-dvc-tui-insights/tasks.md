@@ -29,10 +29,10 @@
 
 ## 5. Experiment branch
 
-- [ ] 5.1 Replace `Run.is_experiment` by a `RunKind`, keeping table reload for experiment, apply and remove runs; verify all existing run tests pass unchanged in behaviour
-- [ ] 5.2 Add the `Prompt` modal, branch-name validation and `runner::exp_branch_args`; verify unit tests for each invalid-name rule and for default, edited and cancelled prompts
-- [ ] 5.3 Wire `b`, the success notice (`git switch <name>`) and the failure display; verify fake-`dvc` tests, then a real `exp branch` in the Git demo checked with `git branch`
-- [ ] 5.4 Update README keys and spec checklist; verify clippy and tests
+- [x] 5.1 Replace `Run.is_experiment` by a `RunKind`, keeping table reload for experiment, apply and remove runs; verify all existing run tests pass unchanged in behaviour
+- [x] 5.2 Add the `Prompt` modal, branch-name validation and `runner::exp_branch_args`; verify unit tests for each invalid-name rule and for default, edited and cancelled prompts
+- [x] 5.3 Wire `b`, the success notice (`git switch <name>`) and the failure display; verify fake-`dvc` tests, then a real `exp branch` in the Git demo checked with `git branch`
+- [x] 5.4 Update README keys and spec checklist; verify clippy and tests
 
 ## 6. DAG view
 

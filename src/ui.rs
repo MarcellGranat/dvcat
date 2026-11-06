@@ -15,6 +15,7 @@ use crate::{
     files::{FileEntry, FileKind, Preview, PreviewBody},
     form::ExperimentForm,
     project::{ParamRef, flatten_leaves, param_value},
+    prompt::Prompt,
     runner::RunOutcome,
     stale::Status,
     theme,
@@ -57,6 +58,12 @@ const FORM_KEYS: &[(&str, &str)] = &[
     ("Enter", "run"),
     ("Esc", "cancel"),
 ];
+const PROMPT_KEYS: &[(&str, &str)] = &[
+    ("type", "edit"),
+    ("Ctrl+U", "clear"),
+    ("Enter", "create"),
+    ("Esc", "cancel"),
+];
 const CONFIRM_KEYS: &[(&str, &str)] = &[("y/Enter", "yes"), ("n/Esc", "no")];
 const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("j/k", "row"),
@@ -67,6 +74,7 @@ const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("[ ]", "metric"),
     ("n", "new"),
     ("a", "apply"),
+    ("b", "branch"),
     ("d", "remove"),
     ("F5", "refresh"),
     ("x", "cancel run"),
@@ -132,6 +140,14 @@ pub fn view(app: &App, frame: &mut Frame) {
         Some(confirm) => {
             render_confirm(confirm, frame, main);
             CONFIRM_KEYS
+        }
+        None => keys,
+    };
+
+    let keys = match &app.prompt {
+        Some(prompt) => {
+            render_prompt(prompt, frame, main);
+            PROMPT_KEYS
         }
         None => keys,
     };
@@ -558,6 +574,36 @@ fn render_confirm(confirm: &Confirm, frame: &mut Frame, area: Rect) {
         Paragraph::new(text).wrap(Wrap { trim: false }).block(block),
         popup,
     );
+}
+
+/// A one-line text prompt in the middle of the screen.
+fn render_prompt(prompt: &Prompt, frame: &mut Frame, area: Rect) {
+    let width = (area.width * 60 / 100).max(36).min(area.width);
+    let height = 5.min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let block = pane(prompt.title.as_str(), true).border_style(Style::new().fg(theme::MAUVE));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let [field, status] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+    let line = Line::from(vec![
+        Span::styled(format!("{}  ", prompt.label), theme::label()),
+        Span::styled(prompt.value.clone(), Style::new().fg(theme::TEXT)),
+        Span::styled("▏", Style::new().fg(theme::MAUVE)),
+    ])
+    .style(theme::selected());
+    frame.render_widget(Paragraph::new(line), field);
+    let message = match &prompt.error {
+        Some(error) => Line::styled(format!("⚠ {error}"), Style::new().fg(theme::RED)),
+        None => Line::styled("creates the branch; it is not checked out", theme::muted()),
+    };
+    frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), status);
 }
 
 fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
@@ -1277,5 +1323,34 @@ mod tests {
             rows[2].starts_with("│  ✓ prepare") && rows[4].starts_with("│▌ ● train"),
             "{rows:#?}"
         );
+    }
+
+    #[test]
+    fn branch_prompt_shows_the_name_a_cursor_and_its_own_hints() {
+        let mut app = demo_app();
+        app.prompt = Some(crate::prompt::Prompt::branch("lr-005"));
+        let rows = render(&app, 100, 24);
+        let text = rows.join("\n");
+        assert!(text.contains("Branch from lr-005"), "{text}");
+        assert!(text.contains("branch name  lr-005-branch▏"), "{text}");
+        assert!(text.contains("not checked out"), "{text}");
+        assert!(
+            rows[23].contains("Enter create") && rows[23].contains("Esc cancel"),
+            "{rows:#?}"
+        );
+        for (w, h) in [(10, 4), (1, 1)] {
+            let _ = render(&app, w, h);
+        }
+    }
+
+    #[test]
+    fn branch_prompt_shows_validation_errors() {
+        let mut app = demo_app();
+        let mut prompt = crate::prompt::Prompt::branch("a");
+        prompt.error = Some("'~' is not allowed in a branch name".into());
+        app.prompt = Some(prompt);
+        let text = screen_at(&app, 24);
+        assert!(text.contains("⚠ '~' is not allowed"), "{text}");
+        assert!(!text.contains("creates the branch"), "{text}");
     }
 }

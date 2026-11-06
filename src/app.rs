@@ -16,6 +16,7 @@ use crate::{
     graph::Graph,
     log::LogBuffer,
     project::{Project, Stage},
+    prompt::{Prompt, PromptAction},
     runner::{self, DvcNotFound, KILL_GRACE, RunOutcome, RunningJob},
     stale::{self, StageStatus},
 };
@@ -127,6 +128,18 @@ pub enum RunPhase {
     Finished(RunOutcome),
 }
 
+/// What a run is for; decides what happens when it ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunKind {
+    Stage,
+    /// `exp run`, `exp apply` or `exp remove`: the experiments table is reloaded afterwards.
+    Experiment,
+    /// `exp branch`: nothing changes in the workspace; a success notice names the branch.
+    Branch {
+        name: String,
+    },
+}
+
 /// The most recent run (kept on screen after it ends, until the next one replaces it).
 #[derive(Debug)]
 pub struct Run {
@@ -134,7 +147,7 @@ pub struct Run {
     pub stage: String,
     /// The `dvc` arguments, shown in the log title and used to start the process.
     pub args: Vec<String>,
-    pub is_experiment: bool,
+    pub kind: RunKind,
     pub with_upstream: bool,
     pub log: LogBuffer,
     pub phase: RunPhase,
@@ -146,24 +159,23 @@ pub struct Run {
 impl Run {
     pub fn new(stage: String, with_upstream: bool) -> Self {
         let args = runner::repro_args(&stage, with_upstream);
-        Self::with_args(stage, args, with_upstream, false)
+        Self::with_args(stage, args, with_upstream, RunKind::Stage)
     }
 
     /// An experiment run; `label` is shown in the header.
     pub fn experiment(label: String, args: Vec<String>) -> Self {
-        Self::with_args(label, args, false, true)
+        Self::with_args(label, args, false, RunKind::Experiment)
     }
 
-    fn with_args(
-        stage: String,
-        args: Vec<String>,
-        with_upstream: bool,
-        is_experiment: bool,
-    ) -> Self {
+    pub fn branch(label: String, args: Vec<String>, name: String) -> Self {
+        Self::with_args(label, args, false, RunKind::Branch { name })
+    }
+
+    fn with_args(stage: String, args: Vec<String>, with_upstream: bool, kind: RunKind) -> Self {
         Self {
             stage,
             args,
-            is_experiment,
+            kind,
             with_upstream,
             log: LogBuffer::new(),
             phase: RunPhase::Running,
@@ -196,6 +208,7 @@ pub struct App {
     /// The open "new experiment" form, if any. Like the preview, it is modal.
     pub form: Option<ExperimentForm>,
     pub confirm: Option<Confirm>,
+    pub prompt: Option<Prompt>,
     /// Cursor in the files pane, an index into [`App::selected_files`].
     pub file_cursor: usize,
     /// The open preview popup, if any. While it is open it receives all keys.
@@ -222,6 +235,7 @@ impl App {
             focus: Focus::Stages,
             form: None,
             confirm: None,
+            prompt: None,
             file_cursor: 0,
             preview: None,
             editor_request: None,
@@ -325,6 +339,9 @@ impl App {
         }
         if self.confirm.is_some() {
             return self.on_confirm_key(key.code);
+        }
+        if self.prompt.is_some() {
+            return self.on_prompt_key(key);
         }
         // An open popup is modal: it gets every key, so `q` closes it instead of quitting.
         if self.preview.is_some() {
@@ -462,6 +479,7 @@ impl App {
             KeyCode::Char('[') => self.cycle_plot_metric(false),
             KeyCode::Char(']') => self.cycle_plot_metric(true),
             KeyCode::Char('n') => self.open_experiment_form(),
+            KeyCode::Char('b') => self.open_branch_prompt(),
             KeyCode::Char('a') => self.ask_about_selected_experiment(Action::Apply),
             KeyCode::Char('d') => self.ask_about_selected_experiment(Action::Remove),
             KeyCode::F(5) => return self.request_experiments(),
@@ -505,25 +523,9 @@ impl App {
 
     /// `a` / `d`: ask before applying or removing the experiment under the cursor.
     fn ask_about_selected_experiment(&mut self, action: Action) {
-        if self.is_running() {
-            self.notice = Some("a run is already in progress (x cancels it)".to_owned());
-            return;
-        }
-        let Some(table) = self.experiments.table() else {
-            self.notice = Some("experiments are not available (press F5 to load them)".to_owned());
+        let Some(name) = self.selected_experiment_for_action() else {
             return;
         };
-        let rows = table.ordered(&self.experiments.sort);
-        let Some(row) = rows
-            .get(self.experiments.row)
-            .filter(|r| r.kind == RowKind::Experiment)
-        else {
-            self.notice = Some(
-                "select an experiment row first (not the workspace or the baseline)".to_owned(),
-            );
-            return;
-        };
-        let name = row.label.clone();
         self.confirm = Some(match action {
             Action::Apply => Confirm {
                 title: format!("Apply {name}?"),
@@ -544,6 +546,63 @@ impl App {
                 args: runner::exp_remove_args(&name),
             },
         });
+    }
+
+    /// The name of the experiment under the cursor, when an action on it is allowed right now.
+    /// Otherwise sets a notice that says why and returns `None`.
+    fn selected_experiment_for_action(&mut self) -> Option<String> {
+        if self.is_running() {
+            self.notice = Some("a run is already in progress (x cancels it)".to_owned());
+            return None;
+        }
+        let Some(table) = self.experiments.table() else {
+            self.notice = Some("experiments are not available (press F5 to load them)".to_owned());
+            return None;
+        };
+        let rows = table.ordered(&self.experiments.sort);
+        let name = rows
+            .get(self.experiments.row)
+            .filter(|row| row.kind == RowKind::Experiment)
+            .map(|row| row.label.clone());
+        if name.is_none() {
+            self.notice = Some(
+                "select an experiment row first (not the workspace or the baseline)".to_owned(),
+            );
+        }
+        name
+    }
+
+    fn open_branch_prompt(&mut self) {
+        if let Some(name) = self.selected_experiment_for_action() {
+            self.prompt = Some(Prompt::branch(&name));
+        }
+    }
+
+    fn on_prompt_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let running = self.is_running();
+        let Some(prompt) = &mut self.prompt else {
+            return Vec::new();
+        };
+        match prompt.on_key(key) {
+            PromptAction::Continue => Vec::new(),
+            PromptAction::Cancel => {
+                self.prompt = None;
+                Vec::new()
+            }
+            PromptAction::Submit(branch) => {
+                if running {
+                    prompt.error = Some("a run is already in progress (x cancels it)".to_owned());
+                    return Vec::new();
+                }
+                let experiment = prompt.target.clone();
+                self.prompt = None;
+                let args = runner::exp_branch_args(&experiment, &branch);
+                self.run = Some(Run::branch(format!("branch {branch}"), args, branch));
+                self.view = View::Pipeline;
+                self.notice = Some("creating the branch; the log is below".to_owned());
+                vec![Effect::StartExperiment]
+            }
+        }
     }
 
     fn on_confirm_key(&mut self, code: KeyCode) -> Vec<Effect> {
@@ -661,14 +720,24 @@ impl App {
         run.log.finish();
         run.job = None; // the process is gone; dropping the handle is now harmless
         let refresh = !matches!(outcome, RunOutcome::NotStarted(_));
-        let was_experiment = run.is_experiment;
+        let kind = run.kind.clone();
+        let succeeded = outcome == RunOutcome::Succeeded;
         run.phase = RunPhase::Finished(outcome);
         let mut effects = Vec::new();
+        // A new branch changes nothing in the workspace, so nothing needs re-checking.
+        let refresh = refresh && !matches!(kind, RunKind::Branch { .. });
+        if let RunKind::Branch { name } = &kind
+            && succeeded
+        {
+            self.notice = Some(format!(
+                "branch '{name}' created (not checked out); switch with: git switch {name}"
+            ));
+        }
         if refresh {
             // Whatever ran may have rewritten dvc.lock, so earlier results are out of date.
             self.statuses = None;
             effects.push(Effect::RefreshStatuses);
-            if was_experiment {
+            if kind == RunKind::Experiment {
                 // A new row may have appeared. (The lock is free again: the run is over.)
                 effects.extend(self.request_experiments());
             }
@@ -1621,7 +1690,7 @@ mod experiments_view_tests {
         assert!(h.app.form.is_none());
         assert_eq!(h.app.view, View::Pipeline, "the log pane lives there");
         let run = h.app.run.as_ref().unwrap();
-        assert!(run.is_experiment && run.is_active());
+        assert!(run.kind == RunKind::Experiment && run.is_active());
         assert_eq!(
             run.command_line(),
             "dvc exp run --temp -n my-exp -S params.yaml:train.lr=0.2"
@@ -1783,6 +1852,119 @@ mod experiments_view_tests {
                 .as_deref()
                 .unwrap()
                 .contains("already in progress")
+        );
+    }
+
+    // ----- exp branch -----
+
+    #[test]
+    fn b_opens_a_prompt_with_the_default_name_only_on_experiment_rows() {
+        let mut h = with_table_loaded();
+        for label in ["workspace", "master"] {
+            cursor_on(&mut h, label);
+            h.press(KeyCode::Char('b'));
+            assert!(h.app.prompt.is_none(), "{label}");
+            assert!(h.app.notice.as_deref().unwrap().contains("experiment row"));
+        }
+        cursor_on(&mut h, "lr-005");
+        h.press(KeyCode::Char('b'));
+        assert_eq!(h.app.prompt.as_ref().unwrap().value, "lr-005-branch");
+    }
+
+    #[test]
+    fn b_is_refused_while_a_run_is_active_or_the_table_is_missing() {
+        let mut h = serving_two();
+        h.app.view = View::Experiments;
+        h.press(KeyCode::Char('b'));
+        assert!(h.app.prompt.is_none() && h.app.notice.as_deref().unwrap().contains("F5"));
+
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "lr-005");
+        h.app.run = Some(Run::new("a".into(), false));
+        h.press(KeyCode::Char('b'));
+        assert!(h.app.prompt.is_none());
+    }
+
+    #[test]
+    fn the_prompt_is_modal_and_esc_runs_nothing() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "lr-005");
+        h.press(KeyCode::Char('b'));
+        type_text(&mut h, "qe");
+        assert!(!h.app.should_quit && h.app.view == View::Experiments);
+        assert!(h.app.prompt.as_ref().unwrap().value.ends_with("qe"));
+        h.press(KeyCode::Esc);
+        assert!(h.app.prompt.is_none() && h.app.run.is_none());
+        assert_eq!(calls(&h), ["exp show --json"]);
+    }
+
+    #[test]
+    fn invalid_names_keep_the_prompt_open() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "lr-005");
+        h.press(KeyCode::Char('b'));
+        type_text(&mut h, " x");
+        let effects = h.press(KeyCode::Enter);
+        assert!(effects.is_empty() && h.app.run.is_none());
+        assert!(h.app.prompt.as_ref().unwrap().error.is_some());
+    }
+
+    #[test]
+    fn enter_runs_exp_branch_and_a_success_names_the_branch_without_reloading_the_table() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "lr-005");
+        h.press(KeyCode::Char('b'));
+        for _ in 0.."-branch".len() {
+            h.press(KeyCode::Backspace);
+        }
+        type_text(&mut h, "-keep");
+        let effects = h.press(KeyCode::Enter);
+        assert_eq!(effects, [Effect::StartExperiment]);
+        assert_eq!(h.app.view, View::Pipeline);
+        assert_eq!(
+            h.app.run.as_ref().unwrap().command_line(),
+            "dvc exp branch lr-005 lr-005-keep"
+        );
+        wait_until_finished(&mut h);
+        assert!(
+            h.app
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("git switch lr-005-keep"),
+            "{:?}",
+            h.app.notice
+        );
+        assert!(
+            !h.app.experiments.loading,
+            "a branch does not change the table"
+        );
+        assert_eq!(h.fetch_count(), 1);
+    }
+
+    #[test]
+    fn a_failed_branch_shows_the_error_and_no_success_notice() {
+        let mut h = harness("echo 'fatal: branch exists' >&2; exit 1");
+        let json = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/exp_show/two.json");
+        let table = experiments::parse(&fs::read_to_string(json).unwrap()).unwrap();
+        h.app.experiments.data = Some(Ok(table));
+        h.app.view = View::Experiments;
+        cursor_on(&mut h, "lr-005");
+        h.press(KeyCode::Char('b'));
+        h.press(KeyCode::Enter);
+        wait_until_finished(&mut h);
+        let run = h.app.run.as_ref().unwrap();
+        assert_eq!(
+            run.phase,
+            RunPhase::Finished(RunOutcome::Failed { code: Some(1) })
+        );
+        assert!(run.log.lines().any(|l| l.contains("branch exists")));
+        assert!(
+            h.app
+                .notice
+                .as_deref()
+                .is_none_or(|n| !n.contains("created"))
         );
     }
 }

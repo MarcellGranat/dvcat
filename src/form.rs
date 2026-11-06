@@ -101,22 +101,9 @@ impl ExperimentForm {
             KeyCode::Enter => return self.submit(),
             KeyCode::Tab | KeyCode::Down => self.move_active(true),
             KeyCode::BackTab | KeyCode::Up => self.move_active(false),
-            KeyCode::Backspace => {
-                self.active_text().pop();
+            _ => {
+                edit_text(self.active_text(), key);
             }
-            // Ctrl+U clears the field, as in a shell.
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.active_text().clear();
-            }
-            // Ignore other Ctrl/Alt combinations instead of typing their letter.
-            KeyCode::Char(c)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                self.active_text().push(c);
-            }
-            _ => {}
         }
         FormAction::Continue
     }
@@ -156,6 +143,30 @@ impl ExperimentForm {
         let name = (!name.is_empty()).then_some(name);
         let label = format!("exp {}", name.unwrap_or("(auto name)"));
         Ok((label, runner::exp_run_args(name, &overrides)))
+    }
+}
+
+/// Apply a key to a line of text: characters append, Backspace deletes, Ctrl+U clears.
+/// Returns whether the key edited the text (other Ctrl/Alt combinations are ignored, not typed).
+pub fn edit_text(text: &mut String, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Backspace => {
+            text.pop();
+            true
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            text.clear();
+            true
+        }
+        KeyCode::Char(c)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            text.push(c);
+            true
+        }
+        _ => false,
     }
 }
 

@@ -49,6 +49,7 @@ If none is found, pressing `r` explains where it looked.
 | `F5`       | *(experiments)* reload with `dvc exp show --json` |
 | `n`        | *(experiments)* new experiment: a form with a name and every param, pre-filled from the row under the cursor |
 | `a` / `d`  | *(experiments)* apply / remove the experiment under the cursor, after a yes/no question |
+| `b`        | *(experiments)* save the experiment under the cursor as a Git branch (`dvc exp branch`); asks for the name |
 | `p`        | *(experiments)* show / hide a chart of one metric across the experiments |
 | `[` / `]`  | *(experiments)* previous / next metric in the chart |
 
@@ -56,6 +57,9 @@ If none is found, pressing `r` explains where it looked.
 DVC first saves your uncommitted changes (undo with `git reset --hard && git stash apply refs/exps/apply/stash`).
 `d` runs `dvc exp remove <name>`, which cannot be undone unless the experiment was pushed. Both only work on experiment rows,
 show DVC's output in the log, and reload the table afterwards.
+
+**Branch.** `b` opens a prompt pre-filled with `<experiment>-branch`; names Git would reject are refused with a reason.
+The branch is created but **not** checked out; the footer tells you the `git switch` command.
 
 **Chart.** With the cursor on a numeric param column the chart plots the metric against that param (one point per experiment);
 on any other column it plots the creation order. The experiment under the table cursor is the solid block.

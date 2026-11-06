@@ -10,6 +10,7 @@ pub mod graph;
 pub mod log;
 pub mod plot;
 pub mod project;
+pub mod prompt;
 pub mod runner;
 pub mod stale;
 pub mod theme;

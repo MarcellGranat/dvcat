@@ -126,6 +126,13 @@ pub fn exp_apply_args(experiment: &str) -> Vec<String> {
     ["exp", "apply", experiment].map(String::from).into()
 }
 
+/// Promote an experiment to a Git branch (not checked out).
+pub fn exp_branch_args(experiment: &str, branch: &str) -> Vec<String> {
+    ["exp", "branch", experiment, branch]
+        .map(String::from)
+        .into()
+}
+
 pub fn exp_remove_args(experiment: &str) -> Vec<String> {
     ["exp", "remove", experiment].map(String::from).into()
 }
@@ -461,6 +468,14 @@ mod tests {
                 "-S",
                 "params.yaml:train.lr=0.2"
             ]
+        );
+    }
+
+    #[test]
+    fn branch_args_name_the_experiment_and_the_branch() {
+        assert_eq!(
+            exp_branch_args("lr-005", "best"),
+            ["exp", "branch", "lr-005", "best"]
         );
     }
 
