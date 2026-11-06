@@ -62,6 +62,7 @@ const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("j/k", "row"),
     ("h/l", "column"),
     ("s", "sort"),
+    ("m", "deltas"),
     ("n", "new"),
     ("a", "apply"),
     ("d", "remove"),

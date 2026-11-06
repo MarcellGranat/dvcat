@@ -45,6 +45,7 @@ If none is found, pressing `r` explains where it looked.
 | `e`        | switch between the pipeline and the experiments table |
 | `h` / `l`  | *(experiments)* move the column cursor   |
 | `s`        | *(experiments)* sort by the cursor column; again flips the direction |
+| `m`        | *(experiments)* show metrics of experiments as differences from their baseline (`▲ +0.1867`) and back |
 | `F5`       | *(experiments)* reload with `dvc exp show --json` |
 | `n`        | *(experiments)* new experiment: a form with a name and every param, pre-filled from the row under the cursor |
 
@@ -54,6 +55,10 @@ If none is found, pressing `r` explains where it looked.
 DVC first saves your uncommitted changes (undo with `git reset --hard && git stash apply refs/exps/apply/stash`).
 `d` runs `dvc exp remove <name>`, which cannot be undone unless the experiment was pushed. Both only work on experiment rows,
 show DVC's output in the log, and reload the table afterwards.
+
+**Comparing with the baseline.** In the experiments table, a param that differs from the experiment's baseline is highlighted.
+`m` switches the metric cells to signed differences; the arrows show direction only (the tool does not know whether higher or lower is better).
+The info line under the table shows the baseline's value for the cell under the cursor. Sorting always uses the real values.
 
 **New experiment form.** `Tab`/`Shift+Tab` move between the fields, typing edits, `Ctrl+U` clears a field and `Enter` runs it.
 Only the values you changed become `-S` overrides, and the command that will run is shown at the bottom of the form.

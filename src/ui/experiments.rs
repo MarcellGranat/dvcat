@@ -9,7 +9,10 @@ use ratatui::{
 
 use crate::{
     app::{App, ExperimentsView},
-    experiments::{Column, Direction, Row, RowKind, Table, cell_text},
+    experiments::{
+        Change, Column, Direction, Row, RowKind, Table, baseline_of, cell_text, metric_delta,
+        param_differs,
+    },
     theme,
 };
 
@@ -54,6 +57,9 @@ fn title(app: &App) -> String {
             " · loading…"
         });
     }
+    if app.experiments.deltas {
+        title.push_str(" · metrics as differences from the baseline");
+    }
     if app.is_running() {
         title.push_str(" · stage run in progress (x cancels; refresh unavailable)");
     }
@@ -66,7 +72,7 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
 
     let columns = table.columns();
     let rows = table.ordered(&view.sort);
-    let widths = column_widths(&columns, &rows);
+    let widths = column_widths(view, &columns, &rows);
     let cursor_column = view.column.min(columns.len().saturating_sub(1));
     let shown = visible_columns(&widths, cursor_column, usize::from(table_area.width));
 
@@ -90,14 +96,11 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
 
     let body: Vec<TableRow> = rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(index, row)| {
             let cells = shown.iter().map(|&i| {
-                let text = if i == 0 {
-                    name_cell(row)
-                } else {
-                    cell_text(row, &columns[i])
-                };
-                Cell::from(fit(&text, widths[i]))
+                let (text, style) = body_cell(view, &rows, index, &columns[i]);
+                Cell::from(fit(&text, widths[i])).style(style)
             });
             TableRow::new(cells).style(row_style(row))
         })
@@ -131,6 +134,11 @@ fn info_line<'a>(
     let mut parts = vec![format!("column: {}", column.title())];
     if let Some(row) = selected {
         parts.push(format!("row: {}", row.label));
+        if !matches!(column, Column::Name)
+            && let Some(baseline) = baseline_of(rows, view.row)
+        {
+            parts.push(format!("baseline: {}", cell_text(baseline, column)));
+        }
         if let Some(timestamp) = &row.timestamp {
             parts.push(timestamp.replace('T', " "));
         }
@@ -182,20 +190,49 @@ fn fit(text: &str, width: usize) -> String {
     format!("{kept}{ELLIPSIS}")
 }
 
+/// The text and style of one body cell. Experiments are compared with their baseline: a param that
+/// differs is highlighted, and in delta mode a numeric metric shows the difference instead.
+fn body_cell(
+    view: &ExperimentsView,
+    rows: &[&Row],
+    index: usize,
+    column: &Column,
+) -> (String, Style) {
+    let row = rows[index];
+    if matches!(column, Column::Name) {
+        return (name_cell(row), Style::new());
+    }
+    let text = cell_text(row, column);
+    let baseline = baseline_of(rows, index);
+    match column {
+        Column::Param(_) if param_differs(row, baseline, column) => (
+            text,
+            Style::new().fg(theme::PEACH).add_modifier(Modifier::BOLD),
+        ),
+        Column::Metric(label) if view.deltas => {
+            match baseline.and_then(|baseline| metric_delta(row, baseline, label)) {
+                Some((change, delta)) => {
+                    let (arrow, color) = match change {
+                        Change::Up => ("▲ ", theme::SAPPHIRE),
+                        Change::Down => ("▼ ", theme::MAUVE),
+                        Change::Same => ("", theme::OVERLAY1),
+                    };
+                    (format!("{arrow}{delta}"), Style::new().fg(color))
+                }
+                None => (text, Style::new()),
+            }
+        }
+        _ => (text, Style::new()),
+    }
+}
+
 /// Each column is as wide as its widest cell or title (plus room for a sort arrow), up to a cap.
-fn column_widths(columns: &[Column], rows: &[&Row]) -> Vec<usize> {
+fn column_widths(view: &ExperimentsView, columns: &[Column], rows: &[&Row]) -> Vec<usize> {
     columns
         .iter()
-        .enumerate()
-        .map(|(i, column)| {
-            let cells = rows.iter().map(|row| {
-                let text = if i == 0 {
-                    name_cell(row)
-                } else {
-                    cell_text(row, column)
-                };
-                text.chars().count()
-            });
+        .map(|column| {
+            let cells =
+                (0..rows.len()).map(|index| body_cell(view, rows, index, column).0.chars().count());
             let title = column.title().chars().count() + 2;
             cells
                 .chain([title])
@@ -488,5 +525,100 @@ mod tests {
         let rows = screen(&app, 100, 10);
         assert!(line_with(&rows, "broken").contains('⚠'));
         assert!(line_with(&rows, "bad params.yaml").contains("⚠ bad params.yaml"));
+    }
+
+    // ---- differences from the baseline ----
+
+    fn cell_style(
+        terminal: &Terminal<TestBackend>,
+        rows: &[String],
+        needle: &str,
+        line: &str,
+    ) -> Style {
+        let y = rows.iter().position(|r| r.contains(line)).unwrap() as u16;
+        let x = rows[y as usize].find(needle).unwrap();
+        let x = rows[y as usize][..x].chars().count() as u16;
+        terminal.backend().buffer()[(x, y)].style()
+    }
+
+    #[test]
+    fn changed_params_are_highlighted_and_equal_ones_are_not() {
+        let app = app_showing(Some(Ok(two())));
+        let terminal = draw(&app, 150, 14);
+        let rows = rows_of(&terminal);
+        // lr-010 has lr 0.1 (baseline 0.01) and epochs 8 (baseline 5); scale is unchanged.
+        let lr = cell_style(&terminal, &rows, "0.1 ", "lr-010");
+        assert_eq!(lr.fg, Some(theme::PEACH), "{rows:#?}");
+        let scale = cell_style(&terminal, &rows, "2.0", "lr-010");
+        assert_ne!(scale.fg, Some(theme::PEACH));
+        // The baseline and workspace rows never highlight anything.
+        let master = cell_style(&terminal, &rows, "0.01", "master");
+        assert_ne!(master.fg, Some(theme::PEACH));
+    }
+
+    #[test]
+    fn delta_mode_shows_signed_differences_for_experiments_only() {
+        let mut app = app_showing(Some(Ok(two())));
+        let before = screen(&app, 150, 14).join("\n");
+        assert!(!before.contains('▲'), "{before}");
+        app.experiments.deltas = true;
+        let rows = rows(&app);
+        let text = rows.join("\n");
+        let lr010 = rows.iter().find(|r| r.contains("lr-010")).unwrap();
+        assert!(lr010.contains("▲ +0.2723"), "{lr010}"); // 0.9356 - 0.6633
+        let master = rows.iter().find(|r| r.contains("master")).unwrap();
+        assert!(!master.contains('▲') && !master.contains('▼'), "{master}");
+        assert!(text.contains("metrics as differences"), "{text}");
+    }
+
+    fn rows(app: &App) -> Vec<String> {
+        let terminal = draw(app, 150, 14);
+        rows_of(&terminal)
+    }
+
+    #[test]
+    fn sorting_in_delta_mode_still_uses_the_real_values() {
+        let mut app = app_showing(Some(Ok(two())));
+        app.experiments.deltas = true;
+        app.experiments.column = app
+            .experiments
+            .table()
+            .unwrap()
+            .columns()
+            .iter()
+            .position(|c| matches!(c, Column::Metric(m) if m.ends_with("auc")))
+            .unwrap();
+        app.update(crate::app::Event::Key(
+            ratatui::crossterm::event::KeyCode::Char('s').into(),
+        ));
+        let rows = rows(&app);
+        let (a, b) = (
+            rows.iter().position(|r| r.contains("lr-005")).unwrap(),
+            rows.iter().position(|r| r.contains("lr-010")).unwrap(),
+        );
+        assert!(a < b, "ascending auc: lr-005 (0.85) before lr-010 (0.9356)");
+    }
+
+    #[test]
+    fn info_line_names_the_baseline_value_for_an_experiment() {
+        let mut app = app_showing(Some(Ok(two())));
+        app.experiments.row = 2;
+        app.experiments.column = 3; // a param column
+        let text = screen(&app, 150, 14).join("\n");
+        assert!(text.contains("baseline: "), "{text}");
+    }
+
+    #[test]
+    fn m_toggles_the_delta_mode() {
+        let mut app = app_showing(Some(Ok(two())));
+        let press = |app: &mut App| {
+            app.update(crate::app::Event::Key(
+                ratatui::crossterm::event::KeyCode::Char('m').into(),
+            ));
+        };
+        press(&mut app);
+        assert!(app.experiments.deltas);
+        press(&mut app);
+        assert!(!app.experiments.deltas);
     }
 }

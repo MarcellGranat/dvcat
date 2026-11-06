@@ -84,6 +84,8 @@ pub struct ExperimentsView {
     pub row: usize,
     pub column: usize,
     pub sort: Sort,
+    /// Show metrics of experiments as differences from their baseline (`m`).
+    pub deltas: bool,
 }
 
 impl ExperimentsView {
@@ -451,6 +453,7 @@ impl App {
                 self.experiments.column = self.experiments.column.saturating_sub(1);
             }
             KeyCode::Char('s') => self.sort_by_cursor_column(),
+            KeyCode::Char('m') => self.experiments.deltas = !self.experiments.deltas,
             KeyCode::Char('n') => self.open_experiment_form(),
             KeyCode::Char('a') => self.ask_about_selected_experiment(Action::Apply),
             KeyCode::Char('d') => self.ask_about_selected_experiment(Action::Remove),

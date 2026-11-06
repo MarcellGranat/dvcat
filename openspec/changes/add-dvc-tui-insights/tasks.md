@@ -17,9 +17,9 @@
 
 ## 3. Metrics diff
 
-- [ ] 3.1 Add baseline lookup, changed-param detection and delta formatting (precision rule, sign, direction) as pure functions; verify unit tests including float noise, missing values and the baseline/workspace rows
-- [ ] 3.2 Highlight changed param cells and add the `m` delta mode to the experiments view with neutral direction colours; verify `TestBackend` tests on the captured `two.json` sample and that sorting still uses underlying values
-- [ ] 3.3 Manual pass on the Git demo against real `exp show`; update README keys
+- [x] 3.1 Add baseline lookup, changed-param detection and delta formatting (precision rule, sign, direction) as pure functions; verify unit tests including float noise, missing values and the baseline/workspace rows
+- [x] 3.2 Highlight changed param cells and add the `m` delta mode to the experiments view with neutral direction colours; verify `TestBackend` tests on the captured `two.json` sample and that sorting still uses underlying values
+- [x] 3.3 Manual pass on the Git demo against real `exp show`; update README keys
 
 ## 4. Metrics plot
 

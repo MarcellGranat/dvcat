@@ -267,6 +267,75 @@ fn display(value: &Value) -> String {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Differences from the baseline
+// ---------------------------------------------------------------------------------------------
+
+/// The baseline an experiment was run from: the nearest baseline row above it in `rows`
+/// (rows in display order). `None` for the workspace and baseline rows themselves.
+pub fn baseline_of<'a>(rows: &[&'a Row], index: usize) -> Option<&'a Row> {
+    if rows.get(index)?.kind != RowKind::Experiment {
+        return None;
+    }
+    rows[..index]
+        .iter()
+        .rev()
+        .find(|row| row.kind == RowKind::Baseline)
+        .copied()
+}
+
+/// Does this experiment's param differ from its baseline's? (Baseline and workspace: never.)
+pub fn param_differs(row: &Row, baseline: Option<&Row>, column: &Column) -> bool {
+    let Some(baseline) = baseline else {
+        return false;
+    };
+    matches!(column, Column::Param(_)) && cell_text(row, column) != cell_text(baseline, column)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    Up,
+    Down,
+    Same,
+}
+
+/// The signed difference between an experiment's metric and its baseline's, written with as many
+/// decimals as the more precise of the two numbers (so float noise like `0.18669999` never shows).
+/// `None` when either side is missing or not a number.
+pub fn metric_delta(row: &Row, baseline: &Row, label: &str) -> Option<(Change, String)> {
+    let now = row.metrics.get(label)?.as_f64()?;
+    let before = baseline.metrics.get(label)?.as_f64()?;
+    let decimals = decimals(now).max(decimals(before));
+    let difference = now - before;
+    let text = format!("{difference:+.decimals$}");
+    // A difference that rounds to zero at this precision is no difference at all.
+    let change = if text
+        .trim_start_matches(['+', '-'])
+        .chars()
+        .all(|c| matches!(c, '0' | '.'))
+    {
+        Change::Same
+    } else if difference > 0.0 {
+        Change::Up
+    } else {
+        Change::Down
+    };
+    let text = if change == Change::Same {
+        "±0".to_owned()
+    } else {
+        text
+    };
+    Some((change, text))
+}
+
+/// Digits after the decimal point in the shortest text that reads back as `value`.
+fn decimals(value: f64) -> usize {
+    let text = value.to_string();
+    text.split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len())
+        .min(10)
+}
+
+// ---------------------------------------------------------------------------------------------
 // Sorting
 // ---------------------------------------------------------------------------------------------
 
@@ -788,5 +857,95 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let error = fetch(&dir.path().join("missing"), dir.path()).unwrap_err();
         assert!(error.contains("cannot start"), "{error}");
+    }
+
+    // ---- differences from the baseline ----
+
+    fn metric_row(kind: RowKind, label: &str, auc: serde_json::Value) -> Row {
+        Row {
+            kind,
+            label: label.into(),
+            rev: String::new(),
+            timestamp: None,
+            params: BTreeMap::from([("p:lr".to_owned(), json!(0.01))]),
+            metrics: BTreeMap::from([("m:auc".to_owned(), auc)]),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn baseline_of_is_the_nearest_baseline_above() {
+        let rows = [
+            metric_row(RowKind::Workspace, "workspace", json!(1)),
+            metric_row(RowKind::Baseline, "main", json!(1)),
+            metric_row(RowKind::Experiment, "a", json!(1)),
+            metric_row(RowKind::Baseline, "other", json!(1)),
+            metric_row(RowKind::Experiment, "b", json!(1)),
+        ];
+        let refs: Vec<&Row> = rows.iter().collect();
+        let label = |i| baseline_of(&refs, i).map(|r| r.label.as_str());
+        assert_eq!((label(0), label(1)), (None, None));
+        assert_eq!((label(2), label(4)), (Some("main"), Some("other")));
+        assert_eq!(label(9), None);
+    }
+
+    #[test]
+    fn params_differ_only_for_experiments_against_their_baseline() {
+        let base = metric_row(RowKind::Baseline, "main", json!(1));
+        let mut exp = metric_row(RowKind::Experiment, "a", json!(1));
+        let column = Column::Param("p:lr".into());
+        assert!(!param_differs(&exp, Some(&base), &column));
+        exp.params.insert("p:lr".into(), json!(0.05));
+        assert!(param_differs(&exp, Some(&base), &column));
+        assert!(!param_differs(
+            &exp,
+            Some(&base),
+            &Column::Metric("m:auc".into())
+        ));
+        assert!(
+            !param_differs(&base, None, &column),
+            "baseline and workspace never differ"
+        );
+    }
+
+    #[test]
+    fn delta_uses_the_precision_of_the_operands_not_float_noise() {
+        let base = metric_row(RowKind::Baseline, "main", json!(0.6633));
+        let exp = metric_row(RowKind::Experiment, "a", json!(0.85));
+        assert_eq!(
+            metric_delta(&exp, &base, "m:auc"),
+            Some((Change::Up, "+0.1867".into()))
+        );
+        let lower = metric_row(RowKind::Experiment, "b", json!(0.5));
+        assert_eq!(
+            metric_delta(&lower, &base, "m:auc"),
+            Some((Change::Down, "-0.1633".into()))
+        );
+    }
+
+    #[test]
+    fn integer_metrics_give_integer_deltas_and_equal_values_no_change() {
+        let base = metric_row(RowKind::Baseline, "main", json!(10));
+        let exp = metric_row(RowKind::Experiment, "a", json!(13));
+        assert_eq!(
+            metric_delta(&exp, &base, "m:auc"),
+            Some((Change::Up, "+3".into()))
+        );
+        let same = metric_row(RowKind::Experiment, "c", json!(10));
+        assert_eq!(
+            metric_delta(&same, &base, "m:auc"),
+            Some((Change::Same, "±0".into()))
+        );
+    }
+
+    #[test]
+    fn missing_or_non_numeric_metrics_have_no_delta() {
+        let base = metric_row(RowKind::Baseline, "main", json!(0.5));
+        let text = metric_row(RowKind::Experiment, "a", json!("n/a"));
+        assert_eq!(metric_delta(&text, &base, "m:auc"), None);
+        let exp = metric_row(RowKind::Experiment, "b", json!(0.7));
+        assert_eq!(metric_delta(&exp, &base, "m:other"), None);
+        let base_text = metric_row(RowKind::Baseline, "main", json!(null));
+        assert_eq!(metric_delta(&exp, &base_text, "m:auc"), None);
     }
 }
