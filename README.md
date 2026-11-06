@@ -7,6 +7,17 @@ run a stage with a live log, and compare experiments. Written in Rust with [rata
 > Features below are marked *(planned)* until they are implemented.
 > Working today: pipeline list, detail pane, files pane with preview and editor, stale detection with reasons, running and cancelling stages, an experiments table with a new-experiment form. The look is [Catppuccin Mocha](https://catppuccin.com) and needs a true-colour terminal.
 
+## Quick start
+
+```sh
+just demo         # builds a Git copy of the demo project (3 experiments) on first use and opens it
+just demo-plain   # the plain demo on a scratch copy (no Git, so no experiments)
+just demo-reset   # rebuild the Git demo from scratch
+just check        # fmt + clippy + tests
+```
+
+`just` finds `dvc` via `$DVC_TUI_DVC`, then `PATH`, then `~/projects/articleIVdb/.venv/bin/dvc` (edit the `dvc` line in `justfile`).
+
 ## Run
 
 ```sh
