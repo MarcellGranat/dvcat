@@ -59,7 +59,9 @@ Typed serde structs for the parts of `exp show --json` we use, with `Option` and
 ### 10. Module layout
 ```
 src/
-  main.rs        arg parsing, terminal setup/teardown, loop
+  main.rs        thin binary: load project, terminal setup/teardown, loop
+  lib.rs         module root (library crate, so tests/ can use everything)
+  cli.rs         argument parsing
   app.rs         App state, Event, update
   ui.rs          view functions per screen
   project.rs     dvc.yaml / dvc.lock / params loading (serde types)

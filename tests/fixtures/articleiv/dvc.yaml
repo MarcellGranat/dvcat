@@ -1,0 +1,15 @@
+stages:
+  download:
+    cmd: python src/download.py
+    deps:
+      - src/download.py
+      - src/documents.py
+    params:
+      - params.json:
+          - download
+    outs:
+      - data/catalog.json
+      - errors.jsonl:
+          cache: false
+      - pdf_files:
+          persist: true

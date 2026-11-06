@@ -1,6 +1,3 @@
-mod app;
-mod ui;
-
 use std::{
     sync::mpsc::{self, RecvTimeoutError, Sender},
     thread,
@@ -13,7 +10,12 @@ use ratatui::{
     crossterm::event::{self, Event as TermEvent, KeyEventKind},
 };
 
-use app::{App, Event};
+use dvc_tui::{
+    app::{App, Event},
+    cli, graph,
+    project::Project,
+    ui,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -27,18 +29,27 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> Result<()> {
+    // Load first: if this fails, the error prints on the normal screen, not the alternate one.
+    let dir = cli::project_dir_from_args(std::env::args())?;
+    let project = Project::load(&dir)?;
+    let graph = graph::build(&project.stages)?; // a cycle error converts into anyhow via `?`
+    let stage_names = graph
+        .order
+        .iter()
+        .map(|&i| project.stages[i].name.clone())
+        .collect();
+
     // `init` enters raw mode + the alternate screen and installs a panic hook that restores them.
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard; // lives until the end of `main`, then `drop` runs
-    run(&mut terminal)
+    run(&mut terminal, stage_names)
 }
 
-fn run(terminal: &mut DefaultTerminal) -> Result<()> {
+fn run(terminal: &mut DefaultTerminal, stage_names: Vec<String>) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     spawn_key_thread(tx); // `tx` is *moved* into the function: we can't use it here any more
 
-    // Placeholder data until the real pipeline loads (group 3).
-    let mut app = App::new(vec!["prepare".into(), "features".into(), "train".into()]);
+    let mut app = App::new(stage_names);
 
     while !app.should_quit {
         // The closure borrows `app` immutably; the borrow ends when `draw` returns...

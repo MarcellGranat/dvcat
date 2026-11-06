@@ -16,9 +16,9 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 
 ## 3. Loading the pipeline
 
-- [ ] 3.1 Implement serde types and loaders for `dvc.yaml`, `dvc.lock` and param files (JSON, YAML); verify unit tests parse the fixture and a copy of the `articleIVdb` files
-- [ ] 3.2 Implement CLI arg handling (project path, default `.`) and the error cases: missing `dvc.yaml`, malformed YAML with file path in the message; verify with tests for both errors
-- [ ] 3.3 Implement graph building (outs → deps path-prefix matching), Kahn topological sort and cycle reporting; verify tests cover ordering, nested paths and a cycle
+- [x] 3.1 Implement serde types and loaders for `dvc.yaml`, `dvc.lock` and param files (JSON, YAML); verify unit tests parse the fixture and a copy of the `articleIVdb` files
+- [x] 3.2 Implement CLI arg handling (project path, default `.`) and the error cases: missing `dvc.yaml`, malformed YAML with file path in the message; verify with tests for both errors
+- [x] 3.3 Implement graph building (outs → deps path-prefix matching), Kahn topological sort and cycle reporting; verify tests cover ordering, nested paths and a cycle
 
 ## 4. Pipeline view
 

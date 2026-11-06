@@ -1,0 +1,11 @@
+{
+  "download": {
+    "start_year": 2001,
+    "end_year": 2025,
+    "page_size": 100,
+    "delay_seconds": 0.5,
+    "timeout_seconds": 60.0,
+    "retries": 5,
+    "limit": null
+  }
+}
