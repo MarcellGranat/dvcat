@@ -32,3 +32,7 @@ check:
     cargo fmt
     cargo clippy --all-targets -- -D warnings
     DVC_BIN="{{dvc}}" cargo test
+
+# Build and install dvcat from this checkout (replaces the installed one, even at the same version).
+install:
+    cargo install --path . --locked --force
