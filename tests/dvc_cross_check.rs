@@ -100,7 +100,7 @@ fn our_verdicts_agree_with_dvc_status() {
     };
     let demo = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/demo");
 
-    let scenarios: [(&str, Mutation); 6] = [
+    let scenarios: [(&str, Mutation); 9] = [
         ("untouched", |_| {}),
         ("param edited", |d| {
             replace_in(&d.join("params.yaml"), "lr: 0.01", "lr: 0.05")
@@ -117,6 +117,22 @@ fn our_verdicts_agree_with_dvc_status() {
                 "python3 src/train.py",
                 "python3 src/train.py --fast",
             );
+        }),
+        ("output deleted", |d| {
+            fs::remove_file(d.join("model.txt")).unwrap()
+        }),
+        ("output edited (new size)", |d| {
+            fs::write(
+                d.join("data/features.csv"),
+                "hand edited, longer than before\n",
+            )
+            .unwrap();
+        }),
+        ("output edited (same size)", |d| {
+            let path = d.join("data/prepared.csv");
+            let mut bytes = fs::read(&path).unwrap();
+            bytes[0] = if bytes[0] == b'x' { b'y' } else { b'x' };
+            fs::write(path, bytes).unwrap();
         }),
         ("two stages edited", |d| {
             fs::write(d.join("src/prepare.py"), "# changed\n").unwrap();

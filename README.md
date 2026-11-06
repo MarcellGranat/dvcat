@@ -72,6 +72,10 @@ are listed, ordered, checked and runnable like any other stage. Supported refere
 
 ## Status glyphs
 
+A stage is stale when its cmd, params, dependencies **or recorded outputs** differ from `dvc.lock` (a deleted output shows
+`missing output: <path>`, an edited one `modified output: <path>`). Outputs are compared by size first and hashed only when the
+size matches; directories and files over 256 MiB are shown as `unverified`.
+
 `✓` up to date · `●` stale (the detail pane says why) · `○` never run · `?` unverified (e.g. a directory dependency) · `…` still checking.
 
 ## Demo project

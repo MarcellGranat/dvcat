@@ -1255,4 +1255,24 @@ mod tests {
         assert!(line_of("each@eu") < line_of("collect"));
         assert!(!text.contains("⚠"), "nothing should be flagged:\n{text}");
     }
+
+    #[test]
+    fn detail_pane_names_the_missing_output() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::test_support::copy_dir(&fixture("demo"), dir.path());
+        std::fs::remove_file(dir.path().join("model.txt")).unwrap();
+        let mut app = with_statuses(app_at(dir.path()));
+        app.selected = 2; // train
+        let text = screen(&app);
+        assert!(text.contains("status   ● stale"), "{text}");
+        assert!(
+            text.contains("why      missing output: model.txt"),
+            "{text}"
+        );
+        let rows = render(&app, 100, 20);
+        assert!(
+            rows[2].starts_with("│  ✓ prepare") && rows[4].starts_with("│▌ ● train"),
+            "{rows:#?}"
+        );
+    }
 }

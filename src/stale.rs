@@ -4,7 +4,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    fs::File,
+    fs::{self, File},
     io::{self, Read},
     path::Path,
 };
@@ -48,6 +48,18 @@ pub enum Reason {
     DirUnverified {
         path: String,
     },
+    /// A recorded output no longer exists in the workspace.
+    OutMissing {
+        path: String,
+    },
+    /// A recorded output exists but its size or content differs from the lock.
+    OutModified {
+        path: String,
+    },
+    /// An output we could not check: a directory, or a file too large to hash.
+    OutUnverified {
+        path: String,
+    },
     Upstream {
         stage: String,
     },
@@ -61,7 +73,9 @@ impl Reason {
     fn is_unverified(&self) -> bool {
         matches!(
             self,
-            Reason::DirUnverified { .. } | Reason::UpstreamUnverified { .. }
+            Reason::DirUnverified { .. }
+                | Reason::OutUnverified { .. }
+                | Reason::UpstreamUnverified { .. }
         )
     }
 }
@@ -93,6 +107,9 @@ impl fmt::Display for Reason {
             Reason::DepAdded { path } => write!(f, "new dependency: {path}"),
             Reason::DepRemoved { path } => write!(f, "dependency removed: {path}"),
             Reason::DirUnverified { path } => write!(f, "unverified directory: {path}"),
+            Reason::OutMissing { path } => write!(f, "missing output: {path}"),
+            Reason::OutModified { path } => write!(f, "modified output: {path}"),
+            Reason::OutUnverified { path } => write!(f, "unverified output: {path}"),
             Reason::Upstream { stage } => write!(f, "upstream: {stage}"),
             Reason::UpstreamUnverified { stage } => write!(f, "upstream unverified: {stage}"),
         }
@@ -176,6 +193,7 @@ pub fn own_reasons(
     }
     reasons.extend(dep_reasons(stage, locked, root));
     reasons.extend(param_reasons(stage, locked, params));
+    reasons.extend(out_reasons(stage, locked, root, HASH_LIMIT));
     reasons
 }
 
@@ -217,6 +235,49 @@ fn dep_reasons(stage: &Stage, locked: &LockStage, root: &Path) -> Vec<Reason> {
             reasons.push(Reason::DepRemoved {
                 path: entry.path.clone(),
             });
+        }
+    }
+    reasons
+}
+
+// ---------------------------------------------------------------------------------------------
+// Outputs
+// ---------------------------------------------------------------------------------------------
+
+/// Files larger than this are not hashed to check an output; they are reported as unverified
+/// when their size matches the lock. (A size mismatch is still reported as modified.)
+pub const HASH_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// Compare the outputs recorded in the lock (and still declared by the stage) with the workspace.
+/// The size recorded in the lock decides most cases without reading the file.
+fn out_reasons(stage: &Stage, locked: &LockStage, root: &Path, hash_limit: u64) -> Vec<Reason> {
+    let mut reasons = Vec::new();
+    for entry in &locked.outs {
+        // An output that is no longer declared is not this stage's concern any more.
+        if !stage.produced().any(|p| clean(p) == clean(&entry.path)) {
+            continue;
+        }
+        let Some(locked_md5) = entry.md5.as_deref() else {
+            continue; // recorded without a hash: nothing to compare with
+        };
+        let path = entry.path.clone();
+        let on_disk = root.join(clean(&entry.path));
+        let Ok(metadata) = fs::metadata(&on_disk) else {
+            reasons.push(Reason::OutMissing { path });
+            continue;
+        };
+        if metadata.is_dir() || locked_md5.ends_with(".dir") {
+            reasons.push(Reason::OutUnverified { path });
+        } else if entry.size.is_some_and(|size| size != metadata.len()) {
+            reasons.push(Reason::OutModified { path });
+        } else if metadata.len() > hash_limit {
+            reasons.push(Reason::OutUnverified { path });
+        } else {
+            match md5_of_file(&on_disk) {
+                Ok(now) if now == locked_md5 => {}
+                Ok(_) => reasons.push(Reason::OutModified { path }),
+                Err(_) => reasons.push(Reason::OutMissing { path }),
+            }
         }
     }
     reasons
@@ -619,5 +680,131 @@ mod tests {
         for (reason, expected) in cases {
             assert_eq!(reason.to_string(), expected);
         }
+    }
+
+    // ---- outputs ----
+
+    #[test]
+    fn a_deleted_output_makes_the_stage_stale() {
+        let (_dir, root) = demo_copy();
+        fs::remove_file(root.join("model.txt")).unwrap();
+        let (project, statuses) = statuses(&root);
+        let train = of(&project, &statuses, "train");
+        assert_eq!(train.status(), Status::Stale);
+        assert_eq!(texts(train), ["missing output: model.txt"]);
+    }
+
+    #[test]
+    fn an_edited_output_with_a_different_size_is_modified_without_hashing() {
+        let (_dir, root) = demo_copy();
+        fs::write(
+            root.join("model.txt"),
+            "much longer than before, certainly\n",
+        )
+        .unwrap();
+        let (project, statuses) = statuses(&root);
+        assert_eq!(
+            texts(of(&project, &statuses, "train")),
+            ["modified output: model.txt"]
+        );
+    }
+
+    #[test]
+    fn an_edit_that_keeps_the_size_is_caught_by_the_hash() {
+        let (_dir, root) = demo_copy();
+        let original = fs::read(root.join("data/prepared.csv")).unwrap();
+        let mut edited = original.clone();
+        edited[0] = if edited[0] == b'x' { b'y' } else { b'x' };
+        fs::write(root.join("data/prepared.csv"), edited).unwrap();
+        let (project, statuses) = statuses(&root);
+        assert_eq!(
+            texts(of(&project, &statuses, "prepare")),
+            ["modified output: data/prepared.csv"]
+        );
+    }
+
+    #[test]
+    fn a_stale_output_makes_downstream_stages_stale() {
+        let (_dir, root) = demo_copy();
+        fs::remove_file(root.join("data/prepared.csv")).unwrap();
+        let (project, statuses) = statuses(&root);
+        assert_eq!(of(&project, &statuses, "prepare").status(), Status::Stale);
+        assert_eq!(of(&project, &statuses, "features").status(), Status::Stale);
+        assert!(
+            texts(of(&project, &statuses, "features")).contains(&"upstream: prepare".to_owned())
+        );
+    }
+
+    #[test]
+    fn untouched_outputs_add_no_reason() {
+        let (_dir, root) = demo_copy();
+        let project = Project::load(&root).unwrap();
+        for stage in &project.stages {
+            let locked = project.lock.stages.get(&stage.name).unwrap();
+            assert!(
+                out_reasons(stage, locked, &root, HASH_LIMIT).is_empty(),
+                "{}",
+                stage.name
+            );
+        }
+    }
+
+    #[test]
+    fn files_over_the_limit_are_unverified_not_hashed() {
+        let (_dir, root) = demo_copy();
+        let project = Project::load(&root).unwrap();
+        let train = project.stages.iter().find(|s| s.name == "train").unwrap();
+        let locked = project.lock.stages.get("train").unwrap();
+        let reasons = out_reasons(train, locked, &root, 1); // every non-empty file is "too large"
+        assert!(
+            reasons
+                .iter()
+                .all(|r| matches!(r, Reason::OutUnverified { .. }))
+                && !reasons.is_empty(),
+            "{reasons:?}"
+        );
+        assert_eq!(StageStatus { reasons }.status(), Status::Unverified);
+    }
+
+    #[test]
+    fn directory_outputs_are_unverified_never_modified_or_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("out")).unwrap();
+        fs::write(root.join("out/a.txt"), "x").unwrap();
+        fs::write(
+            root.join("dvc.yaml"),
+            "stages:\n  s:\n    cmd: x\n    outs:\n      - out\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("dvc.lock"),
+            "schema: '2.0'\nstages:\n  s:\n    cmd: x\n    outs:\n    - path: out\n      hash: md5\n      md5: abc.dir\n      size: 1\n      nfiles: 1\n",
+        )
+        .unwrap();
+        let (project, statuses) = statuses(root);
+        assert_eq!(
+            texts(of(&project, &statuses, "s")),
+            ["unverified output: out"]
+        );
+        assert_eq!(of(&project, &statuses, "s").status(), Status::Unverified);
+    }
+
+    #[test]
+    fn outputs_without_a_recorded_hash_and_undeclared_outputs_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("dvc.yaml"),
+            "stages:\n  s:\n    cmd: x\n    outs:\n      - kept.txt\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("dvc.lock"),
+            "schema: '2.0'\nstages:\n  s:\n    cmd: x\n    outs:\n    - path: kept.txt\n    - path: dropped.txt\n      md5: 00\n      size: 1\n",
+        )
+        .unwrap();
+        let (project, statuses) = statuses(root);
+        assert_eq!(of(&project, &statuses, "s").status(), Status::UpToDate);
     }
 }

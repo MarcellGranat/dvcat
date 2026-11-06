@@ -10,10 +10,10 @@
 
 ## 2. Output check
 
-- [ ] 2.1 Add `OutMissing`, `OutModified` and `OutUnverified` reasons and the size-then-md5 comparison with the 256 MiB limit; verify unit tests for missing, edited (same size and different size), directory, no-hash and over-limit outputs
-- [ ] 2.2 Show the new reasons in the detail pane and keep downstream propagation; verify `TestBackend` tests on the demo fixture with a deleted and an edited `model.txt`
-- [ ] 2.3 Extend `tests/dvc_cross_check.rs` with deleted and edited output scenarios; verify the stage sets agree with `dvc status --json`
-- [ ] 2.4 Manual pass on the Git demo: delete `model.txt`, see `train` stale with "missing output", run it, see it return to up to date; update README
+- [x] 2.1 Add `OutMissing`, `OutModified` and `OutUnverified` reasons and the size-then-md5 comparison with the 256 MiB limit; verify unit tests for missing, edited (same size and different size), directory, no-hash and over-limit outputs
+- [x] 2.2 Show the new reasons in the detail pane and keep downstream propagation; verify `TestBackend` tests on the demo fixture with a deleted and an edited `model.txt`
+- [x] 2.3 Extend `tests/dvc_cross_check.rs` with deleted and edited output scenarios; verify the stage sets agree with `dvc status --json`
+- [x] 2.4 Manual pass on the Git demo: delete `model.txt`, see `train` stale with "missing output", run it, see it return to up to date; update README
 
 ## 3. Metrics diff
 
