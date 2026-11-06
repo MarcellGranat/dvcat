@@ -933,6 +933,10 @@ impl App {
             return Vec::new();
         }
         let name = stage.name.clone();
+        if let Some(reason) = self.blocked_by_outside_run(with_upstream) {
+            self.notice = Some(format!("cannot run '{name}': {reason} (X stops it)"));
+            return Vec::new();
+        }
         self.run = Some(Run::new(name.clone(), with_upstream));
         vec![Effect::StartRun {
             stage: name,
@@ -1041,6 +1045,42 @@ impl App {
         self.external
             .iter()
             .find(|run| run.works_on(&self.project.root, &stage.name, stage.produced()))
+    }
+
+    /// Would DVC refuse to lock what the selected stage (and, with `with_upstream`, the stages it
+    /// depends on) needs, because an outside run holds it? Looks at the lock file afresh.
+    fn blocked_by_outside_run(&mut self, with_upstream: bool) -> Option<String> {
+        self.tick_now();
+        if self.external.is_empty() {
+            return None;
+        }
+        let mut names: Vec<&str> = vec![self.selected_stage()?.name.as_str()];
+        if with_upstream {
+            names.extend(self.selected_upstream());
+        }
+        let root = &self.project.root;
+        for stage in self
+            .project
+            .stages
+            .iter()
+            .filter(|s| names.contains(&s.name.as_str()))
+        {
+            let deps = stage
+                .deps
+                .iter()
+                .map(String::as_str)
+                .chain(stage.params.iter().map(|p| p.file.as_str()));
+            for run in &self.external {
+                if let Some(why) = run.conflict_with(root, deps.clone(), stage.produced()) {
+                    return Some(if stage.name == names[0] {
+                        why
+                    } else {
+                        format!("upstream '{}': {why}", stage.name)
+                    });
+                }
+            }
+        }
+        None
     }
 
     /// `X`: ask whether to stop the outside runs that are holding the project.
@@ -1540,6 +1580,7 @@ mod run_tests {
             pid: child.id(),
             command: "dvc repro".into(),
             writes: Vec::new(),
+            reads: Vec::new(),
         }]));
         h.press(KeyCode::Char('y'));
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1596,6 +1637,33 @@ mod run_tests {
         // Once it is gone the next look finds nothing.
         h.app.tick_now();
         assert!(h.app.external.is_empty());
+    }
+
+    #[test]
+    fn a_stage_that_would_clash_with_an_outside_run_is_refused_with_the_reason() {
+        let mut h = harness("exit 0");
+        let mut child = outside_dvc(&h); // writes a.txt, which stage b depends on
+        h.press(KeyCode::Char('r')); // stage a writes it too
+        assert!(!h.app.is_running());
+        let notice = h.app.notice.clone().unwrap();
+        assert!(notice.contains("cannot run 'a'"), "{notice}");
+        assert!(notice.contains("it writes a.txt"), "{notice}");
+        assert!(notice.contains("`dvc repro a`"), "{notice}");
+
+        h.press(KeyCode::Char('j'));
+        h.press(KeyCode::Char('r')); // stage b reads it
+        let notice = h.app.notice.clone().unwrap();
+        assert!(
+            notice.contains("cannot run 'b': it reads a.txt"),
+            "{notice}"
+        );
+
+        // With the other process gone, the run goes ahead.
+        let _ = child.kill();
+        let _ = child.wait();
+        h.press(KeyCode::Char('r'));
+        assert!(h.app.is_running() || h.app.run.is_some());
+        h.pump_until_finished();
     }
 
     #[test]

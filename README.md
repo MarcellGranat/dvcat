@@ -108,7 +108,8 @@ A `dvc` process that dvcat did not start (another terminal, another tool) is not
 `.dvc/tmp/rwlock`: the header names it (`⚠ outside dvcat: dvc repro pdf2md · 44m`), and stages it works on get a
 `⚠ running outside dvcat` marker (matched by the stage named on its command line, or by outputs it holds a write lock on).
 Press `X` to stop it: after a `y` it gets SIGTERM, together with what it started, and SIGKILL after 5 seconds.
-A run of yours that fails on the lock opens the same question by itself. Its output cannot be followed, because dvcat has no access to it.
+A run of yours that fails on the lock opens the same question by itself.
+Pressing `r`/`R` on a stage that would clash with an outside run (it reads what the other writes, or writes what the other reads or writes) is refused with the reason, e.g. `it reads data/md_files, which `dvc repro pdf2md` (PID 3134785) is writing`. Its output cannot be followed, because dvcat has no access to it.
 
 ## Run times
 

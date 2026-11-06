@@ -25,6 +25,13 @@ pub struct ExternalRun {
     pub command: String,
     /// The paths it holds a write lock on, as DVC recorded them (absolute).
     pub writes: Vec<String>,
+    /// The paths it holds a read lock on (absolute).
+    pub reads: Vec<String>,
+}
+
+/// Do two paths overlap, one being the other or lying inside it?
+fn overlaps(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
 }
 
 impl ExternalRun {
@@ -34,6 +41,47 @@ impl ExternalRun {
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.elapsed().ok())
+    }
+
+    /// Why a stage with these dependencies and outputs (relative to `root`) cannot run next to
+    /// this process: DVC refuses to write what another process reads or writes, and to read what
+    /// another process writes. `None` when the lock would be granted.
+    pub fn conflict_with<'a>(
+        &self,
+        root: &Path,
+        deps: impl Iterator<Item = &'a str>,
+        outs: impl Iterator<Item = &'a str>,
+    ) -> Option<String> {
+        let full = |path: &str| root.join(path.trim_end_matches('/'));
+        let who = format!("`{}` (PID {})", self.short_command(), self.pid);
+        for dep in deps {
+            let path = full(dep);
+            if self
+                .writes
+                .iter()
+                .any(|held| overlaps(&path, Path::new(held)))
+            {
+                return Some(format!("it reads {dep}, which {who} is writing"));
+            }
+        }
+        for out in outs {
+            let path = full(out);
+            if self
+                .writes
+                .iter()
+                .any(|held| overlaps(&path, Path::new(held)))
+            {
+                return Some(format!("it writes {out}, which {who} is writing too"));
+            }
+            if self
+                .reads
+                .iter()
+                .any(|held| overlaps(&path, Path::new(held)))
+            {
+                return Some(format!("it writes {out}, which {who} is reading"));
+            }
+        }
+        None
     }
 
     /// Does this run touch the stage? Either it was asked for by name (`dvc repro <stage>`), or
@@ -53,10 +101,9 @@ impl ExternalRun {
         named
             || produced.any(|path| {
                 let full = root.join(path.trim_end_matches('/'));
-                self.writes.iter().any(|held| {
-                    let held = Path::new(held);
-                    full.starts_with(held) || held.starts_with(&full)
-                })
+                self.writes
+                    .iter()
+                    .any(|held| overlaps(&full, Path::new(held)))
             })
     }
 
@@ -107,12 +154,15 @@ pub fn iter_lock_holders(text: &str) -> impl Iterator<Item = ExternalRun> {
                                 pid,
                                 command: command.to_owned(),
                                 writes: Vec::new(),
+                                reads: Vec::new(),
                             });
                             found.len() - 1
                         }
                     };
-                    if kind == "write" {
-                        found[index].writes.push(file.clone());
+                    match kind.as_str() {
+                        "write" => found[index].writes.push(file.clone()),
+                        "read" => found[index].reads.push(file.clone()),
+                        _ => {}
                     }
                 }
             }
@@ -282,6 +332,7 @@ mod tests {
             pid: 1,
             command: "/v/bin/dvc repro -f pdf2md".into(),
             writes: vec!["/p/data/md_files".into()],
+            reads: vec!["/p/src/a.py".into()],
         };
         let root = Path::new("/p");
         assert!(run.works_on(root, "pdf2md", std::iter::empty()));
@@ -289,6 +340,45 @@ mod tests {
         assert!(run.works_on(root, "other", ["data"].into_iter()));
         assert!(!run.works_on(root, "other", ["data/layout"].into_iter()));
         assert!(!run.works_on(root, "other", ["pdf2md_errors.jsonl"].into_iter()));
+    }
+
+    #[test]
+    fn conflicts_follow_dvcs_read_and_write_locks() {
+        let run = ExternalRun {
+            pid: 9,
+            command: "/v/bin/dvc repro pdf2md".into(),
+            writes: vec!["/p/data/md_files".into()],
+            reads: vec!["/p/src/a.py".into()],
+        };
+        let root = Path::new("/p");
+        let none = std::iter::empty::<&str>;
+        // Reading what the other writes: refused.
+        let why = run
+            .conflict_with(root, ["data/md_files"].into_iter(), none())
+            .unwrap();
+        assert_eq!(
+            why,
+            "it reads data/md_files, which `dvc repro pdf2md` (PID 9) is writing"
+        );
+        // Writing what the other writes or reads: refused.
+        assert!(
+            run.conflict_with(root, none(), ["data/md_files"].into_iter())
+                .is_some()
+        );
+        assert!(
+            run.conflict_with(root, none(), ["src/a.py"].into_iter())
+                .unwrap()
+                .contains("reading")
+        );
+        // Reading what the other reads, or unrelated paths: fine.
+        assert!(
+            run.conflict_with(
+                root,
+                ["src/a.py", "data/other"].into_iter(),
+                ["x.json"].into_iter()
+            )
+            .is_none()
+        );
     }
 
     #[test]

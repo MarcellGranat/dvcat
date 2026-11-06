@@ -1353,6 +1353,7 @@ mod tests {
             pid: 1,
             command: "/v/bin/dvc repro pdf2md".into(),
             writes: Vec::new(),
+            reads: Vec::new(),
         }];
         let text = render(&app, 140, 24).join("\n");
         assert!(text.contains("outside dvcat: dvc repro pdf2md"), "{text}");
