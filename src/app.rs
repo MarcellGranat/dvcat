@@ -1139,14 +1139,14 @@ mod run_tests {
 
     #[test]
     fn stages_we_cannot_expand_are_not_run() {
-        let yaml = "stages:\n  each:\n    foreach: [a]\n    do:\n      cmd: echo\n";
+        let yaml = "stages:\n  each:\n    cmd: echo ${missing}\n";
         let (_dir, mut app) = app_with_files(&[("dvc.yaml", yaml)]);
         let effects = app.update(Event::Key(KeyEvent::new(
             KeyCode::Char('r'),
             KeyModifiers::NONE,
         )));
         assert!(effects.is_empty());
-        assert!(app.notice.as_deref().unwrap().contains("foreach"));
+        assert!(app.notice.as_deref().unwrap().contains("${missing}"));
         assert!(app.run.is_none());
     }
 

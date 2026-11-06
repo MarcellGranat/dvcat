@@ -119,7 +119,7 @@ impl Project {
         }
         let text = fs::read_to_string(&yaml_path)
             .with_context(|| format!("cannot read {}", yaml_path.display()))?;
-        let stages = parse_dvc_yaml(&text)
+        let stages = parse_dvc_yaml_in(&text, Some(root))
             .with_context(|| format!("cannot parse {}", yaml_path.display()))?;
         let lock = Lock::load(&root.join(DVC_LOCK))?;
         let params = load_all_param_files(root, &stages);
@@ -204,12 +204,6 @@ pub fn flatten_leaves<'a>(prefix: &str, value: &'a Value) -> Vec<(String, &'a Va
 }
 
 #[derive(Debug, Deserialize)]
-struct RawDvcYaml {
-    // `Mapping` keeps the order of keys in the file; a BTreeMap would sort them.
-    stages: Option<serde_norway::Mapping>,
-}
-
-#[derive(Debug, Deserialize)]
 struct RawStage {
     cmd: Option<Cmd>,
     #[serde(default)]
@@ -270,18 +264,35 @@ impl RawParam {
     }
 }
 
-/// Parse the text of a `dvc.yaml` into stages, in file order.
+/// Parse the text of a `dvc.yaml` into stages, in file order. `foreach`, `matrix` and `${}`
+/// references are expanded; `vars` files and the default `params.yaml` are not available here.
 pub fn parse_dvc_yaml(text: &str) -> Result<Vec<Stage>> {
-    let raw: RawDvcYaml = serde_norway::from_str(text)?;
+    parse_dvc_yaml_in(text, None)
+}
+
+/// Like [`parse_dvc_yaml`], reading `vars` files and `params.yaml` relative to `root`.
+pub fn parse_dvc_yaml_in(text: &str, root: Option<&Path>) -> Result<Vec<Stage>> {
+    let doc: serde_norway::Value = serde_norway::from_str(text)?;
     let mut stages = Vec::new();
-    for (key, value) in raw.stages.unwrap_or_default() {
-        let Some(name) = key.as_str().map(str::to_owned) else {
-            bail!("stage names must be strings, found {key:?}");
+    for (name, definition) in crate::expand::expand(&doc, root)? {
+        let stage = match definition {
+            Ok(definition) => {
+                let raw: RawStage = serde_norway::from_value(definition)
+                    .with_context(|| format!("invalid definition of stage '{name}'"))?;
+                build_stage(name.clone(), raw)
+                    .with_context(|| format!("invalid definition of stage '{name}'"))?
+            }
+            // Keep the stage visible, flagged, instead of failing the whole project.
+            Err(reason) => Stage {
+                name,
+                cmd: String::new(),
+                deps: Vec::new(),
+                params: Vec::new(),
+                outs: Vec::new(),
+                metrics: Vec::new(),
+                unsupported: Some(reason),
+            },
         };
-        let raw_stage: RawStage = serde_norway::from_value(value)
-            .with_context(|| format!("invalid definition of stage '{name}'"))?;
-        let stage = build_stage(name.clone(), raw_stage)
-            .with_context(|| format!("invalid definition of stage '{name}'"))?;
         stages.push(stage);
     }
     Ok(stages)
@@ -289,7 +300,7 @@ pub fn parse_dvc_yaml(text: &str) -> Result<Vec<Stage>> {
 
 fn build_stage(name: String, raw: RawStage) -> Result<Stage> {
     let unsupported = if raw.foreach.is_some() || raw.matrix.is_some() {
-        Some("foreach/matrix stages are not expanded".to_owned())
+        Some("foreach/matrix could not be expanded".to_owned())
     } else {
         None
     };
@@ -309,15 +320,6 @@ fn build_stage(name: String, raw: RawStage) -> Result<Stage> {
         .into_iter()
         .flat_map(RawParam::into_refs)
         .collect();
-
-    let uses_interpolation = std::iter::once(&cmd)
-        .chain(&raw.deps)
-        .chain(&outs)
-        .chain(&metrics)
-        .any(|s| s.contains("${"));
-    let unsupported = unsupported.or_else(|| {
-        uses_interpolation.then(|| "uses ${} interpolation, which is not expanded".to_owned())
-    });
 
     Ok(Stage {
         name,
@@ -440,19 +442,32 @@ stages:
     }
 
     #[test]
-    fn flags_foreach_and_interpolation_as_unsupported() {
+    fn templated_stages_are_expanded_and_unresolved_ones_are_flagged() {
         let text = r#"
 stages:
   each:
     foreach: [a, b]
     do:
       cmd: echo ${item}
-  vars:
-    cmd: echo ${x}
+      outs:
+        - out-${item}.txt
+  broken:
+    cmd: echo ${nope}
+  escaped:
+    cmd: echo \${HOME}
 "#;
         let stages = parse_dvc_yaml(text).unwrap();
-        assert!(stages[0].unsupported.as_ref().unwrap().contains("foreach"));
-        assert!(stages[1].unsupported.as_ref().unwrap().contains("${}"));
+        let names: Vec<&str> = stages.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["each@a", "each@b", "broken", "escaped"]);
+        assert_eq!(stages[1].cmd, "echo b");
+        assert_eq!(stages[1].outs, ["out-b.txt"]);
+        assert_eq!(stages[0].unsupported, None);
+        assert!(stages[2].unsupported.as_ref().unwrap().contains("${nope}"));
+        assert_eq!(
+            stages[3].unsupported, None,
+            "an escaped reference is literal text"
+        );
+        assert_eq!(stages[3].cmd, "echo ${HOME}");
     }
 
     #[test]

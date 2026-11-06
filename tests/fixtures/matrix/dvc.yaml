@@ -1,0 +1,25 @@
+vars:
+  - region: eu
+stages:
+  each:
+    foreach: [us, eu]
+    do:
+      cmd: echo ${item} ${region} > out-${item}.txt
+      deps:
+        - in-${item}.txt
+      outs:
+        - out-${item}.txt
+  grid:
+    matrix:
+      os: [lin, win]
+      ver: [1, 2]
+    cmd: echo ${item.os} ${item.ver} > g-${item.os}-${item.ver}.txt
+    outs:
+      - g-${item.os}-${item.ver}.txt
+  collect:
+    cmd: cat out-us.txt out-eu.txt > all.txt
+    deps:
+      - out-us.txt
+      - out-eu.txt
+    outs:
+      - all.txt

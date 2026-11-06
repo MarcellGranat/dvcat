@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod expand;
 pub mod experiments;
 pub mod files;
 pub mod form;

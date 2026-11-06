@@ -854,14 +854,11 @@ mod tests {
 
     #[test]
     fn unsupported_stage_is_flagged_in_list_and_detail() {
-        let yaml = "stages:\n  each:\n    foreach: [a]\n    do:\n      cmd: echo\n";
+        let yaml = "stages:\n  each:\n    cmd: echo ${missing}\n";
         let (_dir, app) = app_with_files(&[("dvc.yaml", yaml)]);
         let text = screen(&app);
         assert!(text.contains("each ⚠"), "{text}");
-        assert!(
-            text.contains("foreach/matrix stages are not expanded"),
-            "{text}"
-        );
+        assert!(text.contains("unknown variable '${missing}'"), "{text}");
     }
 
     #[test]
@@ -1244,5 +1241,18 @@ mod tests {
         for (w, h) in [(10, 4), (1, 1)] {
             let _ = render(&app, w, h); // must not panic
         }
+    }
+
+    #[test]
+    fn expanded_stages_are_listed_by_their_dvc_names_in_dependency_order() {
+        let app = with_statuses(app_at(&fixture("matrix")));
+        let rows = render(&app, 100, 20);
+        let text = rows.join("\n");
+        for name in ["each@us", "each@eu", "grid@lin-1", "grid@win-2", "collect"] {
+            assert!(text.contains(name), "missing {name}:\n{text}");
+        }
+        let line_of = |name: &str| rows.iter().position(|r| r.contains(name)).unwrap();
+        assert!(line_of("each@eu") < line_of("collect"));
+        assert!(!text.contains("⚠"), "nothing should be flagged:\n{text}");
     }
 }

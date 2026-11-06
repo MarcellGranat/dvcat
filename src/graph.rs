@@ -228,4 +228,26 @@ mod tests {
         );
         assert_eq!(graph.upstream, [vec![], vec![0], vec![1]]);
     }
+
+    #[test]
+    fn expanded_stages_are_ordered_and_connected_like_hand_written_ones() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/matrix");
+        let project = Project::load(&root).unwrap();
+        let graph = build(&project.stages).unwrap();
+        let order = names(&project.stages, &graph);
+        let position = |name: &str| order.iter().position(|n| n == name).unwrap();
+        assert_eq!(order.len(), 7, "{order:?}");
+        assert!(position("each@us") < position("collect"));
+        assert!(position("each@eu") < position("collect"));
+        let collect = project
+            .stages
+            .iter()
+            .position(|s| s.name == "collect")
+            .unwrap();
+        let upstream: Vec<&str> = graph.upstream[collect]
+            .iter()
+            .map(|&i| project.stages[i].name.as_str())
+            .collect();
+        assert_eq!(upstream, ["each@us", "each@eu"]);
+    }
 }

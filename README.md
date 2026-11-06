@@ -63,6 +63,13 @@ The files pane lists what the selected stage reads and writes (deps, param files
 A preview shows at most the first 64 KiB of a file; directories are listed and binary files are not dumped.
 While a preview is open it receives all keys (`q` closes it), except `Ctrl+C`, which still quits.
 
+## Templated stages
+
+`foreach`, `matrix` and `vars` in `dvc.yaml` are expanded the way DVC does, so `each@us`, `listed@0`, `rich@a` and `grid@lin-1`
+are listed, ordered, checked and runnable like any other stage. Supported references: `${name}`, `${item}`, `${key}`,
+`${item.field}`, `${list[0]}`, from `vars` (inline mappings and YAML/JSON files, also per stage) and the default `params.yaml`;
+`\${` is a literal. A stage that uses anything else (for example `${a:b}`, or an unknown name) is shown with a `⚠` and its reason.
+
 ## Status glyphs
 
 `✓` up to date · `●` stale (the detail pane says why) · `○` never run · `?` unverified (e.g. a directory dependency) · `…` still checking.

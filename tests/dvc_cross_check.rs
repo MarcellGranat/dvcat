@@ -144,3 +144,60 @@ fn our_verdicts_agree_with_dvc_status() {
         mismatches.join("\n")
     );
 }
+
+/// Templated stages: our expanded names match `dvc.lock`, and editing one item's input marks only
+/// that item (as `dvc status` does).
+#[test]
+fn expanded_stages_agree_with_dvc() {
+    let Some(dvc) = find_dvc() else {
+        eprintln!("SKIPPED: no dvc found (set DVC_BIN or put dvc on PATH)");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/matrix"),
+        dir.path(),
+    );
+    for args in [&["init", "--no-scm", "-q"][..], &["repro", "-q"][..]] {
+        let output = Command::new(&dvc)
+            .args(args)
+            .current_dir(dir.path())
+            .env("DVC_NO_ANALYTICS", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "dvc {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let project = Project::load(dir.path()).unwrap();
+    let ours: BTreeSet<String> = project.stages.iter().map(|s| s.name.clone()).collect();
+    let lock: serde_json::Value = serde_json::to_value(
+        serde_norway::from_str::<serde_norway::Value>(
+            &fs::read_to_string(dir.path().join("dvc.lock")).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let theirs: BTreeSet<String> = lock["stages"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(ours, theirs, "stage names");
+    assert_eq!(we_say_changed(dir.path()), BTreeSet::new());
+    assert_eq!(dvc_says_changed(&dvc, dir.path()), BTreeSet::new());
+
+    fs::write(dir.path().join("in-us.txt"), "changed\n").unwrap();
+    assert_eq!(
+        we_say_changed(dir.path()),
+        dvc_says_changed(&dvc, dir.path())
+    );
+    assert_eq!(
+        we_say_changed(dir.path()),
+        BTreeSet::from(["each@us".to_owned()])
+    );
+}

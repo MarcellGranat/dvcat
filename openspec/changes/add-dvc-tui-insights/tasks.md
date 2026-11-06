@@ -2,11 +2,11 @@
 
 ## 1. foreach / matrix / vars expansion
 
-- [ ] 1.1 Add the `expand` module: collect `vars` (inline mappings, files) and default `params.yaml`; substitute `${name}`, `${item}`, `${key}`, `${item.field}`; verify unit tests including type-preserving whole-string references and unresolved references
-- [ ] 1.2 Expand `foreach` (list of scalars, list of mappings, mapping, and `foreach: ${var}`) and `matrix` with DVC's stage names; verify unit tests for each naming rule against the names in the design
-- [ ] 1.3 Feed expanded stages into `Project::load`, flagging only unresolved stages as unsupported; verify existing tests still pass and a new fixture project shows expanded stages ordered with correct edges in a `TestBackend` test
-- [ ] 1.4 Cross-check with real DVC: run `dvc repro` on a templated fixture and compare our stage names, and our stale verdicts after editing one item's input, with `dvc.lock` / `dvc status --json`; run one expanded stage (`name@us`) from the UI and watch it turn up to date
-- [ ] 1.5 Update README (what is expanded, what is flagged) and the fixture; verify `cargo test` and clippy pass
+- [x] 1.1 Add the `expand` module: collect `vars` (inline mappings, files) and default `params.yaml`; substitute `${name}`, `${item}`, `${key}`, `${item.field}`; verify unit tests including type-preserving whole-string references and unresolved references
+- [x] 1.2 Expand `foreach` (list of scalars, list of mappings, mapping, and `foreach: ${var}`) and `matrix` with DVC's stage names; verify unit tests for each naming rule against the names in the design
+- [x] 1.3 Feed expanded stages into `Project::load`, flagging only unresolved stages as unsupported; verify existing tests still pass and a new fixture project shows expanded stages ordered with correct edges in a `TestBackend` test
+- [x] 1.4 Cross-check with real DVC: run `dvc repro` on a templated fixture and compare our stage names, and our stale verdicts after editing one item's input, with `dvc.lock` / `dvc status --json`; run one expanded stage (`name@us`) from the UI and watch it turn up to date
+- [x] 1.5 Update README (what is expanded, what is flagged) and the fixture; verify `cargo test` and clippy pass
 
 ## 2. Output check
 
