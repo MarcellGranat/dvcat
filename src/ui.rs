@@ -8,14 +8,18 @@ use ratatui::{
     widgets::{Block, List, ListItem, ListState, Paragraph, Wrap},
 };
 
+mod experiments;
+
 use crate::{
-    app::{App, Run, RunPhase},
+    app::{App, Run, RunPhase, View},
     project::{ParamRef, flatten_leaves, param_value},
     runner::RunOutcome,
     stale::Status,
 };
 
-const HELP: &str = " j/k move  r run  R run+upstream  x cancel  PgUp/PgDn log  q quit    ✓ ok  ● stale  ○ never run  ? unverified ";
+const HELP: &str = " j/k move  r run  R run+upstream  x cancel  PgUp/PgDn log  e experiments  q quit    ✓ ok  ● stale  ○ never run  ? unverified ";
+const EXPERIMENTS_HELP: &str =
+    " j/k row  h/l column  s sort  F5 refresh  x cancel run  e/Esc pipeline  q quit ";
 /// Width of the label column in the detail pane ("depends", "metrics", ...).
 const LABEL_WIDTH: usize = 9;
 const WARNING: &str = "⚠";
@@ -24,9 +28,27 @@ pub fn view(app: &App, frame: &mut Frame) {
     // Split the screen: a big area on top, one line for help at the bottom.
     let [main, help] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
-    // Split the main area into a list (left) and a detail pane (right).
+    let help_text = match app.view {
+        View::Pipeline => {
+            render_pipeline(app, frame, main);
+            HELP
+        }
+        View::Experiments => {
+            experiments::render(app, frame, main);
+            EXPERIMENTS_HELP
+        }
+    };
+    let footer = match &app.notice {
+        Some(notice) => Paragraph::new(format!(" {notice} ")).style(Style::new().fg(Color::Yellow)),
+        None => Paragraph::new(help_text).dim(),
+    };
+    frame.render_widget(footer, help);
+}
+
+fn render_pipeline(app: &App, frame: &mut Frame, area: ratatui::layout::Rect) {
+    // Split the area into a list (left) and a detail pane (right).
     let [left, right] =
-        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(main);
+        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(area);
 
     render_stage_list(app, frame, left);
     match &app.run {
@@ -39,11 +61,6 @@ pub fn view(app: &App, frame: &mut Frame) {
             render_log(run, frame, bottom);
         }
     }
-    let footer = match &app.notice {
-        Some(notice) => Paragraph::new(format!(" {notice} ")).style(Style::new().fg(Color::Yellow)),
-        None => Paragraph::new(HELP).dim(),
-    };
-    frame.render_widget(footer, help);
 }
 
 fn render_log(run: &Run, frame: &mut Frame, area: ratatui::layout::Rect) {

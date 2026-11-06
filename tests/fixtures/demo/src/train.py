@@ -17,5 +17,6 @@ for epoch in range(1, epochs + 1):
 print()
 print("training done", flush=True)
 Path("model.txt").write_text(f"lr={p['lr']} epochs={epochs}\n")
-auc = round(min(0.99, 0.5 + p["lr"] * epochs * 8), 4)
+effort = p["lr"] * epochs * 10  # grows with lr and epochs, saturating towards 0.99
+auc = round(0.5 + 0.49 * effort / (1 + effort), 4)
 Path("metrics.json").write_text(json.dumps({"auc": auc, "loss": round(1 - auc, 4)}, indent=2))

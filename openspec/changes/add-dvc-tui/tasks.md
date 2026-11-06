@@ -43,9 +43,9 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 
 ## 7. Experiments table
 
-- [ ] 7.1 Implement serde types for `exp show --json` and the pure table model (column union, `file:key` labels, empty cells); verify unit tests on a captured sample from `articleIVdb` and one with metrics from the fixture
-- [ ] 7.2 Implement sorting (numeric vs text, empty last, asc/desc toggle); verify unit tests
-- [ ] 7.3 Add the experiments view with background fetch, loading indicator, error display, `F5` refresh, and disable-during-run message; verify with `TestBackend` tests and a manual run
+- [x] 7.1 Implement serde types for `exp show --json` and the pure table model (column union, `file:key` labels, empty cells); verify unit tests on a captured sample from `articleIVdb` and one with metrics from the fixture
+- [x] 7.2 Implement sorting (numeric vs text, empty last, asc/desc toggle); verify unit tests
+- [x] 7.3 Add the experiments view with background fetch, loading indicator, error display, `F5` refresh, and disable-during-run message; verify with `TestBackend` tests and a manual run
 
 ## 8. Integration and wrap-up
 

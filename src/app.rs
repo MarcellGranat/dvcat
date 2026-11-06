@@ -10,6 +10,7 @@ use std::{
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
+    experiments::{self, Sort, Table},
     graph::Graph,
     log::LogBuffer,
     project::{Project, Stage},
@@ -33,6 +34,32 @@ pub enum Event {
     RunOutput(String),
     /// The run ended (or never started). Always the last event of a run.
     RunFinished(RunOutcome),
+    /// The result of a background `dvc exp show --json`.
+    Experiments(Result<Table, String>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Pipeline,
+    Experiments,
+}
+
+/// Everything the experiments view needs to remember.
+#[derive(Debug, Default)]
+pub struct ExperimentsView {
+    /// `None` until the first fetch finishes. The last result stays visible during a refresh.
+    pub data: Option<Result<Table, String>>,
+    pub loading: bool,
+    /// Cursor: a row in display order and a column in `Table::columns()`.
+    pub row: usize,
+    pub column: usize,
+    pub sort: Sort,
+}
+
+impl ExperimentsView {
+    pub fn table(&self) -> Option<&Table> {
+        self.data.as_ref()?.as_ref().ok()
+    }
 }
 
 /// Something `update` wants done but must not do itself, because it touches the outside world.
@@ -46,6 +73,8 @@ pub enum Effect {
     CancelRun,
     /// Re-read `dvc.lock` and recompute every stage's status.
     RefreshStatuses,
+    /// Run `dvc exp show --json` in the background.
+    FetchExperiments,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +130,8 @@ pub struct App {
     /// `None` while the first stale check is still running.
     pub statuses: Option<Vec<StageStatus>>,
     pub run: Option<Run>,
+    pub view: View,
+    pub experiments: ExperimentsView,
     /// A one-line message for the footer; cleared by the next key press.
     pub notice: Option<String>,
     /// How to find `dvc`. A plain function pointer so tests can substitute their own.
@@ -116,6 +147,8 @@ impl App {
             selected: 0,
             statuses: None,
             run: None,
+            view: View::Pipeline,
+            experiments: ExperimentsView::default(),
             notice: None,
             dvc_lookup: runner::find_dvc_in_env,
             should_quit: false,
@@ -185,6 +218,12 @@ impl App {
                 Vec::new()
             }
             Event::RunFinished(outcome) => self.on_run_finished(outcome),
+            Event::Experiments(result) => {
+                self.experiments.loading = false;
+                self.experiments.data = Some(result);
+                self.clamp_experiments_cursor();
+                Vec::new()
+            }
         }
     }
 
@@ -195,17 +234,103 @@ impl App {
             return Vec::new();
         }
         match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+                Vec::new()
+            }
+            KeyCode::Char('e') => self.toggle_view(),
+            // Stopping a run makes sense from either view.
+            KeyCode::Char('x') => self.request_cancel(),
+            code => match self.view {
+                View::Pipeline => self.on_pipeline_key(code),
+                View::Experiments => self.on_experiments_key(code),
+            },
+        }
+    }
+
+    fn on_pipeline_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        match code {
             KeyCode::Char('j') | KeyCode::Down => self.move_selection_down(),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection_up(),
             KeyCode::Char('r') => return self.request_run(false),
             KeyCode::Char('R') => return self.request_run(true),
-            KeyCode::Char('x') => return self.request_cancel(),
             KeyCode::PageUp => self.scroll_log_back(),
             KeyCode::PageDown => self.scroll_log_forward(),
             _ => {}
         }
         Vec::new()
+    }
+
+    fn toggle_view(&mut self) -> Vec<Effect> {
+        match self.view {
+            View::Experiments => {
+                self.view = View::Pipeline;
+                Vec::new()
+            }
+            View::Pipeline => {
+                self.view = View::Experiments;
+                // Fetch on first visit only; F5 refreshes after that.
+                if self.experiments.data.is_none() {
+                    self.request_experiments()
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    fn request_experiments(&mut self) -> Vec<Effect> {
+        if self.experiments.loading {
+            return Vec::new();
+        }
+        if self.is_running() {
+            self.notice = Some(
+                "experiments can't be loaded while a stage runs (DVC holds the repository lock); press F5 afterwards"
+                    .to_owned(),
+            );
+            return Vec::new();
+        }
+        self.experiments.loading = true;
+        vec![Effect::FetchExperiments]
+    }
+
+    fn on_experiments_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => self.experiments.row += 1,
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.experiments.row = self.experiments.row.saturating_sub(1);
+            }
+            KeyCode::Char('l') | KeyCode::Right => self.experiments.column += 1,
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.experiments.column = self.experiments.column.saturating_sub(1);
+            }
+            KeyCode::Char('s') => self.sort_by_cursor_column(),
+            KeyCode::F(5) => return self.request_experiments(),
+            KeyCode::Esc => self.view = View::Pipeline,
+            _ => {}
+        }
+        self.clamp_experiments_cursor();
+        Vec::new()
+    }
+
+    fn sort_by_cursor_column(&mut self) {
+        let Some(table) = self.experiments.table() else {
+            return;
+        };
+        let Some(column) = table.columns().into_iter().nth(self.experiments.column) else {
+            return;
+        };
+        self.experiments.sort.choose(column);
+    }
+
+    /// Keep the cursor on an existing row and column (the table may have shrunk or be absent).
+    fn clamp_experiments_cursor(&mut self) {
+        let (rows, columns) = self
+            .experiments
+            .table()
+            .map_or((0, 0), |table| (table.rows.len(), table.columns().len()));
+        self.experiments.row = self.experiments.row.min(rows.saturating_sub(1));
+        self.experiments.column = self.experiments.column.min(columns.saturating_sub(1));
     }
 
     pub fn is_running(&self) -> bool {
@@ -297,12 +422,28 @@ impl App {
                     job.cancel();
                 }
             }
+            Effect::FetchExperiments => self.fetch_experiments(tx),
             Effect::RefreshStatuses => {
                 if let Err(error) = self.project.reload_state() {
                     self.notice = Some(format!("could not reload project state: {error:#}"));
                 }
                 self.spawn_status_check(tx);
             }
+        }
+    }
+
+    fn fetch_experiments(&mut self, tx: &Sender<Event>) {
+        let root = self.project.root.clone();
+        match (self.dvc_lookup)(&root) {
+            Ok(dvc) => {
+                let tx = tx.clone();
+                thread::spawn(move || {
+                    let result = experiments::fetch(&dvc, &root);
+                    let _ = tx.send(Event::Experiments(result));
+                });
+            }
+            // Report it the same way as any other failed fetch.
+            Err(error) => self.dispatch(Event::Experiments(Err(error.to_string())), tx),
         }
     }
 
@@ -780,5 +921,284 @@ mod run_tests {
             thread::sleep(Duration::from_millis(20));
         }
         assert!(is_gone(), "process {grandchild} outlived shutdown");
+    }
+}
+
+#[cfg(test)]
+mod experiments_view_tests {
+    use std::{fs, os::unix::fs::PermissionsExt, sync::mpsc, time::Instant};
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::{
+        experiments::{Column, Direction},
+        test_support::app_with_files,
+    };
+
+    const ONE_STAGE: &str = "stages:\n  a:\n    cmd: x\n";
+    const WAIT: Duration = Duration::from_secs(10);
+
+    struct Harness {
+        dir: TempDir,
+        app: App,
+        tx: Sender<Event>,
+        rx: mpsc::Receiver<Event>,
+    }
+
+    /// A fake `dvc` that logs each invocation to `calls.log` and then runs `body`.
+    fn harness(body: &str) -> Harness {
+        let (dir, mut app) = app_with_files(&[("dvc.yaml", ONE_STAGE)]);
+        let script = format!("#!/bin/sh\necho \"$*\" >> calls.log\n{body}\n");
+        let path = dir.path().join("fake-dvc");
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        app.dvc_lookup = |root| Ok(root.join("fake-dvc"));
+        let (tx, rx) = mpsc::channel();
+        Harness { dir, app, tx, rx }
+    }
+
+    fn serving_two() -> Harness {
+        let json = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/exp_show/two.json");
+        harness(&format!("cat '{}'", json.display()))
+    }
+
+    impl Harness {
+        fn press(&mut self, code: KeyCode) -> Vec<Effect> {
+            let effects = self
+                .app
+                .update(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+            for effect in effects.clone() {
+                self.app.execute(effect, &self.tx);
+            }
+            effects
+        }
+
+        fn wait_for_data(&mut self) {
+            let deadline = Instant::now() + WAIT;
+            while self.app.experiments.loading {
+                let left = deadline.saturating_duration_since(Instant::now());
+                let event = self.rx.recv_timeout(left).expect("no experiments event");
+                self.app.dispatch(event, &self.tx);
+            }
+        }
+
+        fn fetch_count(&self) -> usize {
+            fs::read_to_string(self.dir.path().join("calls.log"))
+                .map(|log| log.lines().filter(|l| *l == "exp show --json").count())
+                .unwrap_or(0)
+        }
+    }
+
+    #[test]
+    fn e_opens_the_view_and_starts_one_fetch() {
+        let mut h = serving_two();
+        let effects = h.press(KeyCode::Char('e'));
+        assert_eq!(effects, [Effect::FetchExperiments]);
+        assert_eq!(h.app.view, View::Experiments);
+        assert!(h.app.experiments.loading);
+
+        h.wait_for_data();
+        assert!(!h.app.experiments.loading);
+        assert_eq!(h.app.experiments.table().unwrap().rows.len(), 4);
+        assert_eq!(h.fetch_count(), 1);
+    }
+
+    #[test]
+    fn leaving_and_returning_does_not_fetch_again_but_f5_does() {
+        let mut h = serving_two();
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+
+        h.press(KeyCode::Char('e')); // back to the pipeline
+        assert_eq!(h.app.view, View::Pipeline);
+        assert!(
+            h.press(KeyCode::Char('e')).is_empty(),
+            "data is already there"
+        );
+        assert_eq!(h.fetch_count(), 1);
+
+        assert_eq!(h.press(KeyCode::F(5)), [Effect::FetchExperiments]);
+        h.wait_for_data();
+        assert_eq!(h.fetch_count(), 2);
+    }
+
+    #[test]
+    fn f5_while_a_fetch_is_in_flight_does_not_start_another() {
+        let mut h = serving_two();
+        h.press(KeyCode::Char('e'));
+        assert!(h.press(KeyCode::F(5)).is_empty());
+        h.wait_for_data();
+        assert_eq!(h.fetch_count(), 1);
+    }
+
+    #[test]
+    fn nothing_is_fetched_while_a_stage_is_running_and_the_user_is_told_why() {
+        let mut h = serving_two();
+        h.app.run = Some(Run::new("a".into(), false)); // an active run
+        assert!(h.press(KeyCode::Char('e')).is_empty());
+        assert_eq!(h.app.view, View::Experiments, "the view still opens");
+        assert!(!h.app.experiments.loading);
+        assert!(
+            h.app
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("holds the repository lock")
+        );
+
+        h.press(KeyCode::F(5));
+        assert!(h.app.notice.is_some());
+        assert_eq!(h.fetch_count(), 0);
+
+        // Once the run is over, F5 works.
+        h.app.run.as_mut().unwrap().phase = RunPhase::Finished(RunOutcome::Succeeded);
+        assert_eq!(h.press(KeyCode::F(5)), [Effect::FetchExperiments]);
+        h.wait_for_data();
+        assert!(h.app.experiments.table().is_some());
+    }
+
+    #[test]
+    fn a_failing_command_becomes_an_error_in_the_view_and_f5_retries() {
+        let mut h = harness("echo 'ERROR: not a git repository' >&2; exit 255");
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+        let Some(Err(message)) = &h.app.experiments.data else {
+            panic!("expected an error, got {:?}", h.app.experiments.data);
+        };
+        assert!(
+            message.contains("not a git repository") && message.contains("255"),
+            "{message}"
+        );
+        assert_eq!(
+            h.press(KeyCode::F(5)),
+            [Effect::FetchExperiments],
+            "retry is possible"
+        );
+        h.wait_for_data();
+    }
+
+    #[test]
+    fn missing_dvc_is_reported_in_the_view_with_the_places_searched() {
+        let mut h = serving_two();
+        h.app.dvc_lookup = |_| {
+            Err(DvcNotFound {
+                searched: vec!["somewhere".into()],
+            })
+        };
+        let effects = h.app.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::NONE,
+        )));
+        for effect in effects {
+            h.app.execute(effect, &h.tx);
+        }
+        let Some(Err(message)) = &h.app.experiments.data else {
+            panic!("expected an error");
+        };
+        assert!(message.contains("somewhere"), "{message}");
+        assert!(!h.app.experiments.loading);
+    }
+
+    #[test]
+    fn cursor_keys_stay_inside_the_table() {
+        let mut h = serving_two();
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+        for _ in 0..20 {
+            h.press(KeyCode::Char('j'));
+            h.press(KeyCode::Char('l'));
+        }
+        assert_eq!(h.app.experiments.row, 3, "4 rows");
+        assert_eq!(h.app.experiments.column, 5, "name + 3 params + 2 metrics");
+        for _ in 0..20 {
+            h.press(KeyCode::Char('k'));
+            h.press(KeyCode::Char('h'));
+        }
+        assert_eq!((h.app.experiments.row, h.app.experiments.column), (0, 0));
+    }
+
+    #[test]
+    fn s_sorts_by_the_cursor_column_and_pressing_again_flips_the_direction() {
+        let mut h = serving_two();
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+        // Columns: name, features.scale, train.epochs, train.lr, auc, loss.
+        for _ in 0..4 {
+            h.press(KeyCode::Right);
+        }
+        let auc = Column::Metric("metrics.json:auc".into());
+        h.press(KeyCode::Char('s'));
+        assert_eq!(
+            h.app.experiments.sort.direction_of(&auc),
+            Some(Direction::Ascending)
+        );
+        h.press(KeyCode::Char('s'));
+        assert_eq!(
+            h.app.experiments.sort.direction_of(&auc),
+            Some(Direction::Descending)
+        );
+    }
+
+    #[test]
+    fn run_keys_do_nothing_in_the_experiments_view_but_x_still_cancels() {
+        let mut h = serving_two();
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+        assert!(h.press(KeyCode::Char('r')).is_empty());
+        assert!(h.press(KeyCode::Char('R')).is_empty());
+        assert!(
+            h.app.run.is_none(),
+            "r must not start a stage run from here"
+        );
+
+        h.press(KeyCode::Char('x'));
+        assert_eq!(h.app.notice.as_deref(), Some("nothing is running"));
+
+        h.app.run = Some(Run::new("a".into(), false));
+        let effects = h.app.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(effects, [Effect::CancelRun]);
+        assert_eq!(h.app.run.as_ref().unwrap().phase, RunPhase::Cancelling);
+    }
+
+    #[test]
+    fn esc_returns_to_the_pipeline_and_q_still_quits() {
+        let mut h = serving_two();
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+        h.press(KeyCode::Esc);
+        assert_eq!(h.app.view, View::Pipeline);
+        h.press(KeyCode::Char('e'));
+        h.press(KeyCode::Char('q'));
+        assert!(h.app.should_quit);
+    }
+
+    #[test]
+    fn a_smaller_table_pulls_the_cursor_back_inside() {
+        let mut h = serving_two();
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+        h.app.experiments.row = 3;
+        h.app.experiments.column = 5;
+        let small = crate::experiments::parse(
+            r#"[{"rev":"workspace","name":null,"error":null,"experiments":null,"data":{"timestamp":null,"params":{},"metrics":{}}}]"#,
+        )
+        .unwrap();
+        h.app.update(Event::Experiments(Ok(small)));
+        assert_eq!((h.app.experiments.row, h.app.experiments.column), (0, 0));
+    }
+
+    #[test]
+    fn cursor_keys_before_the_data_arrives_do_not_panic() {
+        let mut h = serving_two();
+        h.app.view = View::Experiments;
+        for code in [KeyCode::Char('j'), KeyCode::Char('l'), KeyCode::Char('s')] {
+            h.press(code);
+        }
+        assert_eq!((h.app.experiments.row, h.app.experiments.column), (0, 0));
     }
 }

@@ -5,7 +5,7 @@ run a stage with a live log, and compare experiments. Written in Rust with [rata
 
 > **Status:** under construction. The change plan lives in `openspec/changes/add-dvc-tui/`.
 > Features below are marked *(planned)* until they are implemented.
-> Working today: pipeline list, detail pane, stale detection with reasons, running and cancelling stages.
+> Working today: pipeline list, detail pane, stale detection with reasons, running and cancelling stages, an experiments table.
 
 ## Run
 
@@ -24,10 +24,12 @@ If none is found, pressing `r` explains where it looked.
 | `q`        | quit                                     |
 | `r`        | run the selected stage only (`dvc repro --single-item`) |
 | `R`        | run it with stale upstream stages (`dvc repro`) |
-| `x`        | cancel the running stage                 |
+| `x`        | cancel the running stage (from either view) |
 | `PgUp` / `PgDn` | scroll the log                      |
-| `e` *(planned)* | experiments view                    |
-| `F5` *(planned)* | refresh experiments                |
+| `e`        | switch between the pipeline and the experiments table |
+| `h` / `l`  | *(experiments)* move the column cursor   |
+| `s`        | *(experiments)* sort by the cursor column; again flips the direction |
+| `F5`       | *(experiments)* reload with `dvc exp show --json` |
 
 ## Status glyphs
 

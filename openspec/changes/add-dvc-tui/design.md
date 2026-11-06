@@ -56,6 +56,9 @@ Spawn with piped stdout and stderr, merged by two reader threads into one event 
 ### 8. Experiments parsing
 Typed serde structs for the parts of `exp show --json` we use, with `Option` and `#[serde(default)]` for everything that may be absent; unknown fields are ignored. The table model (columns, rows, sort) is built from these in a pure module.
 
+### 8b. Experiments view
+`dvc exp show --json` is fetched on a background thread (first visit to the view, then `F5`) and arrives as `Event::Experiments(Result<Table, String>)`. The previous table stays on screen while a refresh runs. The fetch is refused while a stage runs, because `dvc repro` holds the repository lock. Only experiments are sorted (within their baseline); the workspace and baseline rows stay pinned. Numbers sort numerically, everything else as text, empty cells always last. Columns that do not fit are windowed around the cursor, with the name column pinned. Cancelling (`x`) works from both views.
+
 ### 9. Dependencies
 `ratatui` (re-exports `crossterm`), `serde` + `serde_json`, one maintained YAML crate for serde, `anyhow`, `md-5`. Dev: `tempfile`. A panic hook and a drop guard restore the terminal on every exit path.
 
