@@ -33,23 +33,16 @@ fn main() -> Result<()> {
     let dir = cli::project_dir_from_args(std::env::args())?;
     let project = Project::load(&dir)?;
     let graph = graph::build(&project.stages)?; // a cycle error converts into anyhow via `?`
-    let stage_names = graph
-        .order
-        .iter()
-        .map(|&i| project.stages[i].name.clone())
-        .collect();
 
     // `init` enters raw mode + the alternate screen and installs a panic hook that restores them.
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard; // lives until the end of `main`, then `drop` runs
-    run(&mut terminal, stage_names)
+    run(&mut terminal, App::new(project, graph))
 }
 
-fn run(terminal: &mut DefaultTerminal, stage_names: Vec<String>) -> Result<()> {
+fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     spawn_key_thread(tx); // `tx` is *moved* into the function: we can't use it here any more
-
-    let mut app = App::new(stage_names);
 
     while !app.should_quit {
         // The closure borrows `app` immutably; the borrow ends when `draw` returns...

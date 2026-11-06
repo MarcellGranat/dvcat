@@ -29,6 +29,9 @@ pub struct Project {
     /// Stages in the order they are declared in `dvc.yaml`.
     pub stages: Vec<Stage>,
     pub lock: Lock,
+    /// Current workspace contents of every param file the stages mention.
+    /// A file that cannot be read or parsed is kept as an error message for display.
+    pub params: BTreeMap<String, Result<Value, String>>,
 }
 
 /// One stage from `dvc.yaml`.
@@ -119,12 +122,34 @@ impl Project {
         let stages = parse_dvc_yaml(&text)
             .with_context(|| format!("cannot parse {}", yaml_path.display()))?;
         let lock = Lock::load(&root.join(DVC_LOCK))?;
+        let params = load_all_param_files(root, &stages);
         Ok(Self {
             root: root.to_path_buf(),
             stages,
             lock,
+            params,
         })
     }
+}
+
+fn load_all_param_files(root: &Path, stages: &[Stage]) -> BTreeMap<String, Result<Value, String>> {
+    stages
+        .iter()
+        .flat_map(|stage| &stage.params)
+        .map(|param| param.file.clone())
+        .map(|file| {
+            let loaded = load_param_file(root, &file).map_err(|e| format!("{e:#}"));
+            (file, loaded)
+        })
+        .collect()
+}
+
+/// Look up a dotted key such as `train.lr` inside a parsed param file.
+pub fn param_value<'a>(tree: &'a Value, dotted_key: &str) -> Option<&'a Value> {
+    // Step into the tree one key at a time; stop with `None` at the first missing key.
+    dotted_key
+        .split('.')
+        .try_fold(tree, |node, part| node.get(part))
 }
 
 impl Lock {
@@ -155,6 +180,19 @@ pub fn load_param_file(root: &Path, file: &str) -> Result<Value> {
 // ---------------------------------------------------------------------------------------------
 // dvc.yaml parsing
 // ---------------------------------------------------------------------------------------------
+
+/// Flatten nested objects into `(dotted.key, leaf)` pairs, in key order.
+/// Scalars, arrays and empty objects are leaves. The leaves borrow from `value` (`'a`);
+/// the keys are new strings, so `prefix` does not need to outlive the result.
+pub fn flatten_leaves<'a>(prefix: &str, value: &'a Value) -> Vec<(String, &'a Value)> {
+    match value {
+        Value::Object(map) if !map.is_empty() => map
+            .iter()
+            .flat_map(|(key, child)| flatten_leaves(&format!("{prefix}.{key}"), child))
+            .collect(),
+        leaf => vec![(prefix.to_owned(), leaf)],
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct RawDvcYaml {
@@ -406,6 +444,54 @@ stages:
         let stages = parse_dvc_yaml(text).unwrap();
         assert!(stages[0].unsupported.as_ref().unwrap().contains("foreach"));
         assert!(stages[1].unsupported.as_ref().unwrap().contains("${}"));
+    }
+
+    #[test]
+    fn loads_current_param_values_for_every_mentioned_file() {
+        let project = Project::load(&fixture("demo")).unwrap();
+        let tree = project.params["params.yaml"].as_ref().unwrap();
+        assert_eq!(
+            param_value(tree, "train.lr"),
+            Some(&serde_json::json!(0.01))
+        );
+        assert_eq!(param_value(tree, "train.nope"), None);
+        assert_eq!(param_value(tree, "nope.lr"), None);
+
+        let articleiv = Project::load(&fixture("articleiv")).unwrap();
+        let tree = articleiv.params["params.json"].as_ref().unwrap();
+        assert_eq!(param_value(tree, "download.limit"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn flatten_leaves_expands_nested_objects_only() {
+        let tree = serde_json::json!({"a": {"b": 1, "c": {"d": [1, 2]}}, "e": {}, "f": null});
+        let leaves: Vec<_> = flatten_leaves("root", &tree)
+            .into_iter()
+            .map(|(k, v)| (k, v.to_string()))
+            .collect();
+        assert_eq!(
+            leaves,
+            [
+                ("root.a.b".to_owned(), "1".to_owned()),
+                ("root.a.c.d".to_owned(), "[1,2]".to_owned()),
+                ("root.e".to_owned(), "{}".to_owned()),
+                ("root.f".to_owned(), "null".to_owned()),
+            ]
+        );
+        assert_eq!(flatten_leaves("k", &serde_json::json!(5)).len(), 1);
+    }
+
+    #[test]
+    fn unreadable_param_file_is_kept_as_an_error_message() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(DVC_YAML),
+            "stages:\n  a:\n    cmd: x\n    params:\n      - k\n",
+        )
+        .unwrap();
+        let project = Project::load(dir.path()).unwrap();
+        let err = project.params["params.yaml"].as_ref().unwrap_err();
+        assert!(err.contains("params.yaml"), "{err}");
     }
 
     #[test]

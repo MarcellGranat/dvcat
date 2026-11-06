@@ -2,6 +2,11 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::{
+    graph::Graph,
+    project::{Project, Stage},
+};
+
 /// Everything that can happen to the app arrives as an `Event`.
 /// Later groups add variants here (run output, experiment results, ...).
 #[derive(Debug)]
@@ -11,19 +16,46 @@ pub enum Event {
 
 #[derive(Debug)]
 pub struct App {
-    /// Placeholder list; replaced by real stages in group 3.
-    pub items: Vec<String>,
+    pub project: Project,
+    pub graph: Graph,
+    /// Position in the displayed (topological) order, *not* an index into `project.stages`.
     pub selected: usize,
     pub should_quit: bool,
 }
 
 impl App {
-    pub fn new(items: Vec<String>) -> Self {
+    pub fn new(project: Project, graph: Graph) -> Self {
         Self {
-            items,
+            project,
+            graph,
             selected: 0,
             should_quit: false,
         }
+    }
+
+    pub fn stage_count(&self) -> usize {
+        self.graph.order.len()
+    }
+
+    /// The stage shown at `position` in the list. The returned reference borrows from `self`.
+    pub fn stage_at(&self, position: usize) -> Option<&Stage> {
+        let index = *self.graph.order.get(position)?;
+        self.project.stages.get(index)
+    }
+
+    pub fn selected_stage(&self) -> Option<&Stage> {
+        self.stage_at(self.selected)
+    }
+
+    /// Names of the stages the selected stage depends on (empty if none or nothing selected).
+    pub fn selected_upstream(&self) -> Vec<&str> {
+        let Some(&index) = self.graph.order.get(self.selected) else {
+            return Vec::new();
+        };
+        self.graph.upstream[index]
+            .iter()
+            .map(|&up| self.project.stages[up].name.as_str())
+            .collect()
     }
 
     /// The only function that mutates the app (`&mut self`).
@@ -48,7 +80,7 @@ impl App {
     }
 
     fn move_selection_down(&mut self) {
-        if self.selected + 1 < self.items.len() {
+        if self.selected + 1 < self.stage_count() {
             self.selected += 1;
         }
     }
@@ -62,13 +94,22 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{app_with_files, demo_app};
 
     fn app() -> App {
-        App::new(vec!["a".into(), "b".into(), "c".into()])
+        demo_app()
     }
 
     fn press(app: &mut App, code: KeyCode) {
         app.update(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn selected_upstream_lists_dependency_names() {
+        let mut app = app();
+        assert!(app.selected_upstream().is_empty()); // prepare
+        app.selected = 2;
+        assert_eq!(app.selected_upstream(), ["features"]); // train
     }
 
     #[test]
@@ -126,10 +167,22 @@ mod tests {
 
     #[test]
     fn movement_on_empty_list_is_safe() {
-        let mut app = App::new(Vec::new());
+        let (_dir, mut app) = app_with_files(&[("dvc.yaml", "stages: {}\n")]);
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('k'));
         assert_eq!(app.selected, 0);
+        assert!(app.selected_stage().is_none());
+        assert!(app.selected_upstream().is_empty());
+    }
+
+    #[test]
+    fn selection_follows_dependency_order_not_declaration_order() {
+        let yaml = "stages:\n  train:\n    cmd: t\n    deps: [f.csv]\n  features:\n    cmd: f\n    outs: [f.csv]\n";
+        let (_dir, mut app) = app_with_files(&[("dvc.yaml", yaml)]);
+        assert_eq!(app.selected_stage().unwrap().name, "features");
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.selected_stage().unwrap().name, "train");
+        assert_eq!(app.selected_upstream(), ["features"]);
     }
 
     #[test]

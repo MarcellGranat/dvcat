@@ -5,3 +5,6 @@ pub mod cli;
 pub mod graph;
 pub mod project;
 pub mod ui;
+
+#[cfg(test)]
+mod test_support;

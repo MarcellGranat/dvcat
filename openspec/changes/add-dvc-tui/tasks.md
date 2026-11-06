@@ -22,9 +22,9 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 
 ## 4. Pipeline view
 
-- [ ] 4.1 Render the stage list with the dependency names of the selected stage; verify with a ratatui `TestBackend` snapshot of the fixture
-- [ ] 4.2 Render the detail pane (cmd, deps, params with current values, outs) and update on selection change; verify a `TestBackend` test for a stage with params
-- [ ] 4.3 Run the app against `~/projects/articleIVdb` read-only and the fixture; verify both display correctly by hand
+- [x] 4.1 Render the stage list with the dependency names of the selected stage; verify with a ratatui `TestBackend` snapshot of the fixture
+- [x] 4.2 Render the detail pane (cmd, deps, params with current values, outs) and update on selection change; verify a `TestBackend` test for a stage with params
+- [x] 4.3 Run the app against `~/projects/articleIVdb` read-only and the fixture; verify both display correctly by hand
 
 ## 5. Stale detection
 
