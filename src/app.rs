@@ -86,6 +86,10 @@ pub struct ExperimentsView {
     pub sort: Sort,
     /// Show metrics of experiments as differences from their baseline (`m`).
     pub deltas: bool,
+    /// Show the chart under the table (`p`).
+    pub plot: bool,
+    /// Which plottable metric the chart shows (`[` / `]`); taken modulo the number of metrics.
+    pub plot_metric: usize,
 }
 
 impl ExperimentsView {
@@ -454,6 +458,9 @@ impl App {
             }
             KeyCode::Char('s') => self.sort_by_cursor_column(),
             KeyCode::Char('m') => self.experiments.deltas = !self.experiments.deltas,
+            KeyCode::Char('p') => self.experiments.plot = !self.experiments.plot,
+            KeyCode::Char('[') => self.cycle_plot_metric(false),
+            KeyCode::Char(']') => self.cycle_plot_metric(true),
             KeyCode::Char('n') => self.open_experiment_form(),
             KeyCode::Char('a') => self.ask_about_selected_experiment(Action::Apply),
             KeyCode::Char('d') => self.ask_about_selected_experiment(Action::Remove),
@@ -463,6 +470,22 @@ impl App {
         }
         self.clamp_experiments_cursor();
         Vec::new()
+    }
+
+    fn cycle_plot_metric(&mut self, forward: bool) {
+        let count = self
+            .experiments
+            .table()
+            .map_or(0, |table| crate::plot::plottable_metrics(table).len());
+        if count == 0 {
+            return;
+        }
+        let current = self.experiments.plot_metric % count;
+        self.experiments.plot_metric = if forward {
+            (current + 1) % count
+        } else {
+            (current + count - 1) % count
+        };
     }
 
     /// Open the form with the values of the row under the cursor.

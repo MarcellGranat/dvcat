@@ -23,9 +23,9 @@
 
 ## 4. Metrics plot
 
-- [ ] 4.1 Add the pure `plot` points function (param on X, creation order otherwise, metric choice, non-numeric and missing values skipped); verify unit tests
-- [ ] 4.2 Add the `p` panel with `Chart`, metric cycling (`[`/`]`), cursor point and the "nothing to plot" state; verify `TestBackend` tests, including tiny terminals
-- [ ] 4.3 Manual pass on the Git demo (lr against auc); update README keys
+- [x] 4.1 Add the pure `plot` points function (param on X, creation order otherwise, metric choice, non-numeric and missing values skipped); verify unit tests
+- [x] 4.2 Add the `p` panel with `Chart`, metric cycling (`[`/`]`), cursor point and the "nothing to plot" state; verify `TestBackend` tests, including tiny terminals
+- [x] 4.3 Manual pass on the Git demo (lr against auc); update README keys
 
 ## 5. Experiment branch
 

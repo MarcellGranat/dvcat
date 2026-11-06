@@ -4,7 +4,12 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Cell, Paragraph, Row as TableRow, Table as TableWidget, TableState, Wrap},
+    symbols::Marker,
+    text::Span,
+    widgets::{
+        Axis, Cell, Chart, Dataset, GraphType, Paragraph, Row as TableRow, Table as TableWidget,
+        TableState, Wrap,
+    },
 };
 
 use crate::{
@@ -13,9 +18,12 @@ use crate::{
         Change, Column, Direction, Row, RowKind, Table, baseline_of, cell_text, metric_delta,
         param_differs,
     },
-    theme,
+    plot, theme,
 };
 
+/// The plot needs this much height in the experiments area, else it is not drawn.
+const PLOT_MIN_AREA_HEIGHT: u16 = 12;
+const PLOT_MAX_HEIGHT: u16 = 14;
 const MAX_COLUMN_WIDTH: usize = 28;
 const COLUMN_SPACING: usize = 2;
 const ELLIPSIS: char = '…';
@@ -43,6 +51,14 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
                 .style(Style::new().fg(theme::RED))
                 .wrap(Wrap { trim: false });
             frame.render_widget(error, inner);
+        }
+        Some(Ok(table)) if view.plot && inner.height >= PLOT_MIN_AREA_HEIGHT => {
+            let chart_height = (inner.height / 2).min(PLOT_MAX_HEIGHT);
+            let [table_area, chart_area] =
+                Layout::vertical([Constraint::Min(4), Constraint::Length(chart_height)])
+                    .areas(inner);
+            render_table(view, table, frame, table_area);
+            render_plot(view, table, frame, chart_area);
         }
         Some(Ok(table)) => render_table(view, table, frame, inner),
     }
@@ -116,6 +132,70 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
 
     let info = info_line(view, table, &columns[cursor_column], &rows);
     frame.render_widget(info, info_area);
+}
+
+/// The chart under the table: the chosen metric against the cursor param (or creation order).
+fn render_plot(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: Rect) {
+    let metrics = plot::plottable_metrics(table);
+    if metrics.is_empty() {
+        let block = super::pane("Plot", false);
+        let text = "Nothing to plot: a metric needs numeric values for at least two experiments.";
+        frame.render_widget(
+            Paragraph::new(text).style(theme::muted()).block(block),
+            area,
+        );
+        return;
+    }
+    let metric = &metrics[view.plot_metric % metrics.len()];
+    let columns = table.columns();
+    let plot = plot::plot(table, &view.sort, columns.get(view.column), metric);
+
+    let all: Vec<(f64, f64)> = plot.points.iter().map(|p| (p.x, p.y)).collect();
+    let selected = plot.point_for_row(view.row);
+    let chosen: Vec<(f64, f64)> = selected.map(|p| vec![(p.x, p.y)]).unwrap_or_default();
+
+    let (x_min, x_max, y_min, y_max) = plot.bounds();
+    let mut title = format!("{} vs {}", plot.y_title, plot.x_title);
+    if let Some(point) = selected {
+        title.push_str(&format!(" · {}", point.label));
+    }
+    if metrics.len() > 1 {
+        title.push_str(&format!(
+            " · metric {}/{} ([ ])",
+            view.plot_metric % metrics.len() + 1,
+            metrics.len()
+        ));
+    }
+    let datasets = vec![
+        Dataset::default()
+            .marker(Marker::Dot)
+            .graph_type(GraphType::Scatter)
+            .style(Style::new().fg(theme::SAPPHIRE))
+            .data(&all),
+        Dataset::default()
+            .marker(Marker::Block)
+            .graph_type(GraphType::Scatter)
+            .style(Style::new().fg(theme::MAUVE))
+            .data(&chosen),
+    ];
+    let axis = |title: &str, low: f64, high: f64| {
+        Axis::default()
+            .title(Span::styled(title.to_owned(), theme::muted()))
+            .style(Style::new().fg(theme::SURFACE2))
+            .labels([short_number(low), short_number(high)])
+            .bounds([low, high])
+    };
+    let chart = Chart::new(datasets)
+        .block(super::pane(title, false))
+        .x_axis(axis(&plot.x_title, x_min, x_max))
+        .y_axis(axis(&plot.y_title, y_min, y_max));
+    frame.render_widget(chart, area);
+}
+
+/// At most four decimals, without trailing zeros.
+fn short_number(value: f64) -> String {
+    let text = format!("{value:.4}");
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 fn info_line<'a>(
@@ -620,5 +700,124 @@ mod tests {
         assert!(app.experiments.deltas);
         press(&mut app);
         assert!(!app.experiments.deltas);
+    }
+
+    // ---- plot panel ----
+
+    fn press(app: &mut App, c: char) {
+        app.update(crate::app::Event::Key(
+            ratatui::crossterm::event::KeyCode::Char(c).into(),
+        ));
+    }
+
+    fn column_of(app: &App, suffix: &str) -> usize {
+        app.experiments
+            .table()
+            .unwrap()
+            .columns()
+            .iter()
+            .position(|c| c.title().ends_with(suffix))
+            .unwrap()
+    }
+
+    #[test]
+    fn p_toggles_the_chart_without_touching_cursor_or_sort() {
+        let mut app = app_showing(Some(Ok(two())));
+        app.experiments.row = 2;
+        app.experiments.column = column_of(&app, "train.lr");
+        let (row, column) = (app.experiments.row, app.experiments.column);
+        assert!(!screen(&app, 140, 34).join("\n").contains(" vs "));
+        press(&mut app, 'p');
+        assert!(app.experiments.plot);
+        assert!(screen(&app, 140, 34).join("\n").contains(" vs "));
+        press(&mut app, 'p');
+        assert!(!app.experiments.plot);
+        assert_eq!((app.experiments.row, app.experiments.column), (row, column));
+    }
+
+    #[test]
+    fn chart_title_names_both_axes_and_the_experiment_under_the_cursor() {
+        let mut app = app_showing(Some(Ok(two())));
+        app.experiments.plot = true;
+        app.experiments.column = column_of(&app, "train.lr");
+        app.experiments.row = 3; // lr-010
+        let text = screen(&app, 140, 34).join("\n");
+        assert!(
+            text.contains("metrics.json:auc vs params.yaml:train.lr"),
+            "{text}"
+        );
+        assert!(text.contains("lr-010"), "{text}");
+        assert!(
+            text.contains("█"),
+            "the selected point is drawn as a block:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_marked_point_follows_the_table_cursor() {
+        let mut app = app_showing(Some(Ok(two())));
+        app.experiments.plot = true;
+        app.experiments.column = column_of(&app, "train.lr");
+        let block_x = |app: &App| {
+            let rows = screen(app, 140, 34);
+            rows.iter().find_map(|r| r.chars().position(|c| c == '█'))
+        };
+        app.experiments.row = 2;
+        let first = block_x(&app);
+        app.experiments.row = 3;
+        let second = block_x(&app);
+        assert!(
+            first.is_some() && second.is_some() && first != second,
+            "{first:?} {second:?}"
+        );
+    }
+
+    #[test]
+    fn the_name_column_plots_creation_order() {
+        let mut app = app_showing(Some(Ok(two())));
+        app.experiments.plot = true;
+        app.experiments.column = 0;
+        let text = screen(&app, 140, 34).join("\n");
+        assert!(text.contains("vs creation order"), "{text}");
+    }
+
+    #[test]
+    fn with_too_little_data_the_panel_says_so() {
+        let mut app = app_showing(Some(Ok(none())));
+        app.experiments.plot = true;
+        let text = screen(&app, 140, 34).join("\n");
+        assert!(
+            text.contains("Nothing to plot") || !text.contains(" vs "),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn bracket_keys_cycle_through_plottable_metrics() {
+        let mut app = app_showing(Some(Ok(two())));
+        app.experiments.plot = true;
+        let count = plot::plottable_metrics(app.experiments.table().unwrap()).len();
+        assert!(count >= 2, "the sample has auc and loss");
+        press(&mut app, ']');
+        assert_eq!(app.experiments.plot_metric, 1);
+        press(&mut app, '[');
+        press(&mut app, '[');
+        assert_eq!(app.experiments.plot_metric, count - 1, "wraps backwards");
+        let text = screen(&app, 140, 34).join("\n");
+        assert!(text.contains(&format!("metric {count}/{count}")), "{text}");
+    }
+
+    #[test]
+    fn chart_is_skipped_on_short_terminals_and_never_panics() {
+        let mut app = app_showing(Some(Ok(two())));
+        app.experiments.plot = true;
+        for (w, h) in [(140, 10), (30, 14), (10, 5), (1, 1), (140, 40)] {
+            let _ = screen(&app, w, h);
+        }
+        let short = screen(&app, 140, 12).join("\n");
+        assert!(
+            !short.contains(" vs "),
+            "table only when there is no room:\n{short}"
+        );
     }
 }

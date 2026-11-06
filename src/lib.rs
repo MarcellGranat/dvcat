@@ -8,6 +8,7 @@ pub mod files;
 pub mod form;
 pub mod graph;
 pub mod log;
+pub mod plot;
 pub mod project;
 pub mod runner;
 pub mod stale;
