@@ -52,15 +52,42 @@ The system SHALL show whether the run succeeded or failed with its exit code, an
 - **THEN** the run does not start and the interface states where it looked
 
 ### Requirement: Cancel a run
-The system SHALL stop an active run when the user presses `x`, without leaving orphaned child processes.
+The system SHALL stop an active run when the user presses `x`, without leaving orphaned child processes. Quitting does not stop a run (see "Runs outlive the interface").
 
 #### Scenario: Cancel
 - **WHEN** a run is active and the user cancels it
 - **THEN** the process is terminated, the log shows the run as cancelled, and a new run can then be started
 
+#### Scenario: Quit while cancelling
+- **WHEN** the user quits after cancelling a run that has not exited yet
+- **THEN** the application waits until the process is gone before exiting, so a cancel is never left half done
+
+### Requirement: Runs outlive the interface
+The system SHALL leave an active run going when the user quits, and SHALL pick it up again the next time it is started in the same project: following it live if it is still running, or showing how it ended if it finished in the meantime.
+
 #### Scenario: Quit during run
 - **WHEN** the user quits while a run is active
-- **THEN** the process is terminated before the application exits
+- **THEN** the run keeps going, and a message printed after the terminal is restored says which command is still running and how to follow it
+
+#### Scenario: Reopen while it runs
+- **WHEN** the interface is started in a project whose earlier run is still going
+- **THEN** the run is shown with the output produced so far, new output keeps arriving, its time counts from the real start, and `x` cancels it
+
+#### Scenario: Finished while closed
+- **WHEN** the interface is started and the earlier run has finished
+- **THEN** its full log, outcome and duration are shown once, stage statuses are refreshed, and the next start does not show it again
+
+#### Scenario: Died without a status
+- **WHEN** the earlier run is gone without having recorded an exit status (for example it was killed)
+- **THEN** it is shown as failed rather than as running
+
+#### Scenario: Unrelated process
+- **WHEN** the remembered process id now belongs to a process that is not one of this tool's runs
+- **THEN** it is neither followed nor signalled
+
+#### Scenario: One run at a time
+- **WHEN** an earlier run is still going
+- **THEN** starting another run is refused, as for any active run
 
 ### Requirement: Run duration
 The system SHALL show how long a run has taken, live while it is active and fixed once it ends, and SHALL remember how the latest run of each stage started from the interface ended and how long it took.

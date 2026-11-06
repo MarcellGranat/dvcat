@@ -56,10 +56,16 @@ fn main() -> Result<()> {
     let _guard = TerminalGuard; // lives until the end of `main`, then `drop` runs
     let mut app = App::new(project, graph);
     app.enable_history();
-    run(&mut terminal, app)
+    let result = run(&mut terminal, app);
+    // Restore the terminal first, so the message lands on the normal screen and stays visible.
+    drop(_guard);
+    if let Ok(Some(message)) = &result {
+        eprintln!("dvc_tui: {message}");
+    }
+    result.map(|_| ())
 }
 
-fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
+fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<Option<String>> {
     let (tx, rx) = mpsc::channel();
     // While an editor owns the terminal, the key thread must not read (it would steal keystrokes).
     // An `Arc<AtomicBool>` is a flag both threads can see; `Arc` shares ownership, the atomic
@@ -68,6 +74,7 @@ fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
     // Each producer gets its own clone of the sender; `tx` stays here for later jobs.
     spawn_key_thread(tx.clone(), Arc::clone(&paused));
     app.spawn_status_check(&tx);
+    app.reattach(&tx);
 
     while !app.should_quit {
         // The closure borrows `app` immutably; the borrow ends when `draw` returns...
@@ -83,9 +90,8 @@ fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
             app.editor_closed(result.err(), &tx);
         }
     }
-    // Never leave a `dvc` process behind.
-    app.shutdown();
-    Ok(())
+    // A run keeps going without us; tell the user once the terminal is back to normal.
+    Ok(app.shutdown())
 }
 
 /// Give the terminal to `$VISUAL`/`$EDITOR` until it exits, then take it back.

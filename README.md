@@ -38,7 +38,7 @@ If none is found, pressing `r` explains where it looked.
 | `o`        | *(files pane or preview)* open the file in `$VISUAL` / `$EDITOR` (`vi` if unset) |
 | `Esc`      | close the preview; from the files pane back to the stages |
 | `g` / `G`  | *(preview)* top / bottom                 |
-| `q`        | quit                                     |
+| `q`        | quit; a running stage **keeps running** and is picked up again when you start `dvc_tui` in the project |
 | `r`        | run the selected stage only (`dvc repro --single-item`) |
 | `R`        | run it with stale upstream stages (`dvc repro`) |
 | `x`        | cancel the running stage (from either view) |
@@ -84,6 +84,13 @@ While a preview is open it receives all keys (`q` closes it), except `Ctrl+C`, w
 `g` draws the stages as boxes in dependency layers, left to right, with a line and an arrowhead for each dependency.
 Boxes carry the status glyph and colour of the stage list; the line under the graph describes the stage under the cursor.
 The cursor is shared with the pipeline view (the same stage stays selected), and a graph larger than the screen scrolls to keep it in view.
+
+## Runs outlive the interface
+
+`dvc` runs started from the interface are detached: quitting with `q` does not stop them, and a message tells you which command
+is still going. Start `dvc_tui` in the same project again and the run is shown with its output so far and keeps streaming
+(its time counts from the real start; `x` still cancels it). A run that finished while the interface was closed is shown once,
+with its log, outcome and duration. To stop a run, press `x` first. The state lives in `.dvc/tmp/dvc-tui-run.*` (`.dvc-tui/` if there is no `.dvc`).
 
 ## Run times
 

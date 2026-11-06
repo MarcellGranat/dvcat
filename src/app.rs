@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::Sender,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -20,7 +20,7 @@ use crate::{
     log::LogBuffer,
     project::{Project, Stage},
     prompt::{Prompt, PromptAction},
-    runner::{self, DvcNotFound, KILL_GRACE, RunOutcome, RunningJob},
+    runner::{self, Attached, DvcNotFound, KILL_GRACE, RunOutcome, RunRecord, RunningJob},
     stale::{self, StageStatus},
 };
 
@@ -162,6 +162,9 @@ pub struct Run {
     started: Instant,
     /// How long it took; `None` while it is still going.
     elapsed: Option<Duration>,
+    /// A duration known from elsewhere (a run that ended while the interface was closed), used
+    /// instead of the time since `started`.
+    fixed_duration: Option<Duration>,
     job: Option<RunningJob>,
 }
 
@@ -210,8 +213,57 @@ impl Run {
             scroll: 0,
             started: Instant::now(),
             elapsed: None,
+            fixed_duration: None,
             job: None,
         }
+    }
+
+    /// The part of this run that [`runner::attach`] needs to find it again.
+    fn record(&self) -> RunRecord {
+        let (kind, branch) = match &self.kind {
+            RunKind::Stage => ("stage", None),
+            RunKind::Experiment => ("experiment", None),
+            RunKind::Branch { name } => ("branch", Some(name.clone())),
+        };
+        let started_ms = SystemTime::now()
+            .checked_sub(self.started.elapsed())
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_millis() as u64);
+        RunRecord {
+            pgid: 0,
+            args: self.args.clone(),
+            stage: self.stage.clone(),
+            kind: kind.to_owned(),
+            branch,
+            with_upstream: self.with_upstream,
+            started_ms,
+        }
+    }
+
+    /// A run from an earlier session, as found by [`runner::attach`].
+    fn restored(record: &RunRecord) -> Self {
+        let kind = match (record.kind.as_str(), &record.branch) {
+            ("experiment", _) => RunKind::Experiment,
+            ("branch", Some(name)) => RunKind::Branch { name: name.clone() },
+            _ => RunKind::Stage,
+        };
+        let mut run = Self::with_args(
+            record.stage.clone(),
+            record.args.clone(),
+            record.with_upstream,
+            kind,
+        );
+        // Count the time since it really started, not since this session did.
+        let since_start = Duration::from_millis(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64)
+                .saturating_sub(record.started_ms),
+        );
+        run.started = Instant::now()
+            .checked_sub(since_start)
+            .unwrap_or_else(Instant::now);
+        run
     }
 
     pub fn is_active(&self) -> bool {
@@ -870,7 +922,7 @@ impl App {
         let refresh = !matches!(outcome, RunOutcome::NotStarted(_));
         let kind = run.kind.clone();
         let succeeded = outcome == RunOutcome::Succeeded;
-        let duration = run.started.elapsed();
+        let duration = run.fixed_duration.unwrap_or_else(|| run.started.elapsed());
         run.elapsed = Some(duration);
         // A run in which DVC only said "didn't change, skipping" did nothing, so it is no "last run".
         let skipped = run.skipped_target();
@@ -936,6 +988,11 @@ impl App {
 
     /// Handle an event and then carry out whatever side effects it asked for.
     pub fn dispatch(&mut self, event: Event, tx: &Sender<Event>) {
+        // Once the end of a run has been seen, its files are no longer needed: without this, the
+        // next session would find the finished run and report it again.
+        if matches!(event, Event::RunFinished(_)) {
+            runner::forget(&self.project.root);
+        }
         for effect in self.update(event) {
             self.execute(effect, tx);
         }
@@ -1007,13 +1064,13 @@ impl App {
     /// Start the process described by the current `self.run`.
     fn start_job(&mut self, tx: &Sender<Event>) {
         let root = self.project.root.clone();
-        let Some(args) = self.run.as_ref().map(|run| run.args.clone()) else {
+        let Some(record) = self.run.as_ref().map(Run::record) else {
             return;
         };
         let started = (self.dvc_lookup)(&root)
             .map_err(|error| error.to_string())
             .and_then(|dvc| {
-                runner::start(&dvc, &root, &args, tx.clone())
+                runner::start_recorded(&dvc, &root, record, tx.clone())
                     .map_err(|error| format!("cannot start {}: {error}", dvc.display()))
             });
         match started {
@@ -1028,9 +1085,57 @@ impl App {
     }
 
     /// Stop any running process and wait for it to exit. Call before the program ends.
-    pub fn shutdown(&mut self) {
-        if let Some(job) = self.run.as_ref().and_then(|run| run.job.as_ref()) {
-            job.terminate_blocking(KILL_GRACE, KILL_GRACE + QUIT_WAIT);
+    ///
+    /// A run keeps going after the interface quits (the next session picks it up again), with one
+    /// exception: a run that is being cancelled is waited for, because the timer that escalates
+    /// to SIGKILL dies with this process. Returns a message when a run is left running.
+    pub fn shutdown(&mut self) -> Option<String> {
+        let run = self.run.as_ref().filter(|run| run.is_active())?;
+        if run.phase == RunPhase::Cancelling {
+            if let Some(job) = &run.job {
+                job.terminate_blocking(KILL_GRACE, KILL_GRACE + QUIT_WAIT);
+            }
+            return None;
+        }
+        Some(format!(
+            "{} is still running in the background; start dvc_tui in this project again to follow it.",
+            run.command_line()
+        ))
+    }
+
+    /// Pick up a run that an earlier session left behind: follow it if it is still going, or show
+    /// how it ended if it finished while the interface was closed. Called once, at startup.
+    pub fn reattach(&mut self, tx: &Sender<Event>) {
+        if self.run.is_some() {
+            return;
+        }
+        match runner::attach(&self.project.root, tx.clone()) {
+            None => {}
+            Some(Attached::Running { record, job }) => {
+                let mut run = Run::restored(&record);
+                run.job = Some(job);
+                self.notice = Some(format!(
+                    "following a run started earlier: {}",
+                    run.command_line()
+                ));
+                self.run = Some(run);
+            }
+            Some(Attached::Finished {
+                record,
+                log,
+                outcome,
+                duration,
+            }) => {
+                let mut run = Run::restored(&record);
+                run.log.push_str(&log);
+                run.fixed_duration = duration;
+                self.notice = Some(format!(
+                    "a run finished while dvc_tui was closed: {}",
+                    run.command_line()
+                ));
+                self.run = Some(run);
+                self.dispatch(Event::RunFinished(outcome), tx);
+            }
         }
     }
 
@@ -1455,37 +1560,171 @@ mod run_tests {
         assert_eq!(app.run.as_ref().unwrap().scroll, 0);
     }
 
-    #[test]
     #[cfg(target_os = "linux")]
-    fn shutdown_stops_a_running_job_and_everything_it_started() {
-        let mut h = harness("sleep 60 &\necho $! > grandchild.pid\nwait");
-        h.press(KeyCode::Char('r'));
+    fn grandchild_of(h: &Harness) -> u32 {
         let pid_file = h.dir.path().join("grandchild.pid");
         let deadline = Instant::now() + WAIT;
-        let grandchild: u32 = loop {
+        loop {
             if let Ok(text) = fs::read_to_string(&pid_file)
                 && let Ok(pid) = text.trim().parse()
             {
-                break pid;
+                return pid;
             }
             assert!(Instant::now() < deadline, "grandchild never started");
             thread::sleep(Duration::from_millis(10));
-        };
+        }
+    }
 
-        h.app.shutdown();
-
-        let is_gone = || match fs::read_to_string(format!("/proc/{grandchild}/stat")) {
+    fn is_gone(pid: u32) -> bool {
+        match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Err(_) => true,
             Ok(stat) => stat
                 .rsplit(')')
                 .next()
                 .is_some_and(|r| r.trim_start().starts_with('Z')),
-        };
+        }
+    }
+
+    #[test]
+    fn quitting_leaves_a_running_job_running_and_says_so() {
+        let mut h = harness("sleep 60 &\necho $! > grandchild.pid\nwait");
+        h.press(KeyCode::Char('r'));
+        let grandchild = grandchild_of(&h);
+
+        let message = h.app.shutdown().expect("a message about the run");
+        assert!(message.contains("dvc repro --single-item a"), "{message}");
+        assert!(message.contains("still running"), "{message}");
+        thread::sleep(Duration::from_millis(300));
+        assert!(!is_gone(grandchild), "the run must outlive the interface");
+
+        h.cancel_and_wait(); // clean up
         let deadline = Instant::now() + Duration::from_secs(2);
-        while !is_gone() && Instant::now() < deadline {
+        while !is_gone(grandchild) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
-        assert!(is_gone(), "process {grandchild} outlived shutdown");
+        assert!(is_gone(grandchild));
+    }
+
+    #[test]
+    fn quitting_with_nothing_running_has_nothing_to_say() {
+        let mut h = harness("true");
+        assert_eq!(h.app.shutdown(), None);
+        h.press(KeyCode::Char('r'));
+        h.pump_until_finished();
+        assert_eq!(
+            h.app.shutdown(),
+            None,
+            "a finished run is not a running one"
+        );
+    }
+
+    #[test]
+    fn quitting_while_cancelling_waits_until_the_process_is_gone() {
+        let mut h = harness("sleep 60 &\necho $! > grandchild.pid\nwait");
+        h.press(KeyCode::Char('r'));
+        let grandchild = grandchild_of(&h);
+        h.press(KeyCode::Char('x'));
+        assert_eq!(h.app.run.as_ref().unwrap().phase, RunPhase::Cancelling);
+        assert_eq!(h.app.shutdown(), None);
+        assert!(
+            is_gone(grandchild),
+            "the cancel must be completed before exiting"
+        );
+    }
+
+    #[test]
+    fn a_new_session_follows_a_run_the_previous_one_left_running() {
+        let mut h = harness("echo started; sleep 0.8; echo finished");
+        h.press(KeyCode::Char('r'));
+        h.app.shutdown(); // "quit"; the run continues
+        let old_tx = h.tx.clone();
+        drop(old_tx);
+
+        let mut next = crate::test_support::app_at(h.dir.path());
+        next.dvc_lookup = |root| Ok(root.join("fake-dvc"));
+        let (tx, rx) = mpsc::channel();
+        next.reattach(&tx);
+        let run = next.run.as_ref().expect("the run is picked up");
+        assert!(run.is_active());
+        assert_eq!(run.stage, "a");
+        assert!(
+            next.notice
+                .as_deref()
+                .unwrap()
+                .contains("following a run started earlier")
+        );
+
+        let deadline = Instant::now() + WAIT;
+        while next.is_running() {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            next.dispatch(event, &tx);
+        }
+        let run = next.run.as_ref().unwrap();
+        assert_eq!(run.phase, RunPhase::Finished(RunOutcome::Succeeded));
+        let log: Vec<&str> = run.log.lines().collect();
+        assert!(
+            log.contains(&"started") && log.contains(&"finished"),
+            "{log:?}"
+        );
+        assert!(
+            next.last_runs.contains_key("a"),
+            "recorded like any other run"
+        );
+        assert!(next.run.as_ref().unwrap().duration() >= Duration::from_millis(600));
+    }
+
+    #[test]
+    fn a_run_that_finished_while_closed_is_shown_once_and_recorded() {
+        let mut h = harness("echo done quietly");
+        h.press(KeyCode::Char('r'));
+        let exit_file = h.dir.path().join(".dvc-tui").join("dvc-tui-run.exit");
+        let deadline = Instant::now() + WAIT;
+        while !exit_file.exists() {
+            assert!(Instant::now() < deadline, "the run never finished");
+            thread::sleep(Duration::from_millis(20));
+        }
+        h.app.shutdown();
+
+        let mut next = crate::test_support::app_at(h.dir.path());
+        let (tx, _rx) = mpsc::channel();
+        next.reattach(&tx);
+        let run = next.run.as_ref().unwrap();
+        assert_eq!(run.phase, RunPhase::Finished(RunOutcome::Succeeded));
+        assert!(run.log.lines().any(|l| l == "done quietly"));
+        assert!(
+            next.notice
+                .as_deref()
+                .unwrap()
+                .contains("finished while dvc_tui was closed")
+        );
+        assert_eq!(next.last_runs["a"].outcome, RunOutcome::Succeeded);
+
+        let mut third = crate::test_support::app_at(h.dir.path());
+        third.reattach(&tx);
+        assert!(third.run.is_none(), "reported only once");
+    }
+
+    #[test]
+    fn finishing_a_run_normally_removes_its_files() {
+        let mut h = harness("echo x");
+        h.press(KeyCode::Char('r'));
+        h.pump_until_finished();
+        let mut next = crate::test_support::app_at(h.dir.path());
+        let (tx, _rx) = mpsc::channel();
+        next.reattach(&tx);
+        assert!(next.run.is_none());
+    }
+
+    #[test]
+    fn reattaching_does_nothing_while_a_run_is_already_shown() {
+        let mut h = harness("true");
+        h.app.run = Some(Run::new("a".into(), false));
+        let (tx, _rx) = mpsc::channel();
+        h.app.reattach(&tx);
+        assert_eq!(h.app.run.as_ref().unwrap().stage, "a");
+        assert!(h.app.notice.is_none());
     }
 }
 

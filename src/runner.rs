@@ -4,7 +4,8 @@ use std::{
     env,
     ffi::OsStr,
     fmt,
-    io::{self, Read},
+    fs::{self, File},
+    io::{self, Read, Seek, SeekFrom},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -13,9 +14,11 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::Sender,
     },
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+use serde::{Deserialize, Serialize};
 
 use crate::app::Event;
 
@@ -24,7 +27,10 @@ pub const DVC_ENV_VAR: &str = "DVC_TUI_DVC";
 /// How long a cancelled run may take to react to SIGTERM before it is killed.
 pub const KILL_GRACE: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
-const SPAWN_RETRIES: usize = 5;
+/// How often the log file is read for new output.
+const FOLLOW_INTERVAL: Duration = Duration::from_millis(40);
+/// How often a run without an exit status is checked for being alive.
+const ALIVE_CHECK_INTERVAL: Duration = Duration::from_millis(400);
 
 // ---------------------------------------------------------------------------------------------
 // Locating dvc
@@ -153,14 +159,97 @@ pub enum RunOutcome {
     NotStarted(String),
 }
 
-/// Handle to a running `dvc` process and everything it spawned.
+/// What is remembered about a run so that a later session can pick it up again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunRecord {
+    /// Process group id of the run's wrapper (`0` until it has been spawned).
+    pub pgid: u32,
+    /// The `dvc` arguments.
+    pub args: Vec<String>,
+    /// A stage name, or a label such as `exp lr-1`.
+    pub stage: String,
+    /// `stage`, `experiment` or `branch`.
+    pub kind: String,
+    /// The branch name, for `kind == "branch"`.
+    pub branch: Option<String>,
+    pub with_upstream: bool,
+    /// When the run was started, in milliseconds since the Unix epoch.
+    pub started_ms: u64,
+}
+
+impl RunRecord {
+    /// A record for a plain `dvc <args>` run.
+    pub fn plain(args: &[String]) -> Self {
+        Self {
+            pgid: 0,
+            args: args.to_vec(),
+            stage: String::new(),
+            kind: "stage".to_owned(),
+            branch: None,
+            with_upstream: false,
+            started_ms: now_ms(),
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Handle to a running `dvc` process and everything it spawned. Dropping the handle does **not**
+/// stop the run: runs outlive the interface on purpose (see [`attach`]).
 #[derive(Debug)]
 pub struct RunningJob {
-    /// Process group id: the child leads its own group, so this equals the child's pid.
+    /// Process group id: the wrapper leads its own group, so this equals its pid.
     pgid: u32,
-    /// Set by the waiter thread once the child has exited.
+    /// Set once the run is over (its exit status was read, or it is known to be gone).
     finished: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Where a run keeps its state
+// ---------------------------------------------------------------------------------------------
+
+const RECORD_FILE: &str = "dvc-tui-run.json";
+const LOG_FILE: &str = "dvc-tui-run.log";
+const EXIT_FILE: &str = "dvc-tui-run.exit";
+/// Appears in the wrapper's command line, which is how a live run is recognised (and a recycled
+/// process id is not mistaken for it).
+const MARKER: &str = "dvc_tui_run";
+/// Runs `"$@"` with its output appended to a file and writes the exit status to another, so both
+/// outlive the interface. `trap :` keeps the wrapper alive when the group gets SIGTERM, so it can
+/// still record the status (a handler, unlike "ignore", is reset by `exec` in the children).
+/// Exit status 126 is retried: a freshly written script can briefly look "busy" to `exec`.
+const WRAPPER: &str = r#": dvc_tui_run
+trap : TERM INT
+tries=0
+while :; do
+  "$@" >>"$DVC_TUI_LOG" 2>&1 </dev/null
+  code=$?
+  if [ "$code" = 126 ] && [ "$tries" -lt 5 ]; then tries=$((tries+1)); sleep 0.02; continue; fi
+  break
+done
+echo "$code" >"$DVC_TUI_EXIT""#;
+
+/// `<root>/.dvc/tmp` (DVC keeps it out of Git), or `<root>/.dvc-tui` when there is no `.dvc`.
+fn state_dir(root: &Path) -> PathBuf {
+    let dvc = root.join(".dvc");
+    if dvc.is_dir() {
+        dvc.join("tmp")
+    } else {
+        root.join(".dvc-tui")
+    }
+}
+
+/// Delete the files of the last run (once it has been shown, or before a new one starts).
+pub fn forget(root: &Path) {
+    let dir = state_dir(root);
+    for file in [RECORD_FILE, LOG_FILE, EXIT_FILE] {
+        let _ = fs::remove_file(dir.join(file));
+    }
 }
 
 /// Start `dvc <args>` in `root`. Output and the final outcome arrive on `tx` as events.
@@ -170,100 +259,237 @@ pub fn start(
     args: &[String],
     tx: Sender<Event>,
 ) -> io::Result<RunningJob> {
-    let mut child = spawn_with_retry(dvc, root, args)?;
-    let pgid = child.id();
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
-
-    let readers: Vec<JoinHandle<()>> = vec![
-        spawn_pump(stdout, tx.clone()),
-        spawn_pump(stderr, tx.clone()),
-    ];
-
-    let finished = Arc::new(AtomicBool::new(false));
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let (finished_flag, cancelled_flag) = (Arc::clone(&finished), Arc::clone(&cancelled));
-    thread::spawn(move || {
-        let status = child.wait();
-        // The process is gone: from now on its pid must never be signalled.
-        finished_flag.store(true, Ordering::SeqCst);
-        // Make sure every chunk of output is delivered before announcing the end.
-        for reader in readers {
-            let _ = reader.join();
-        }
-        let outcome = match status {
-            _ if cancelled_flag.load(Ordering::SeqCst) => RunOutcome::Cancelled,
-            Ok(status) if status.success() => RunOutcome::Succeeded,
-            Ok(status) => RunOutcome::Failed {
-                code: status.code(),
-            },
-            Err(error) => RunOutcome::NotStarted(format!("lost track of the process: {error}")),
-        };
-        let _ = tx.send(Event::RunFinished(outcome));
-    });
-
-    Ok(RunningJob {
-        pgid,
-        finished,
-        cancelled,
-    })
+    start_recorded(dvc, root, RunRecord::plain(args), tx)
 }
 
-fn spawn_with_retry(dvc: &Path, root: &Path, args: &[String]) -> io::Result<std::process::Child> {
-    let mut command = Command::new(dvc);
-    command
-        .args(args)
+/// Start the run described by `record`, and write the record next to the run's log so that a later
+/// session can [`attach`] to it. The process is detached from this one: it keeps going if the
+/// interface quits.
+pub fn start_recorded(
+    dvc: &Path,
+    root: &Path,
+    mut record: RunRecord,
+    tx: Sender<Event>,
+) -> io::Result<RunningJob> {
+    // A path we were given must exist; a bare name is looked up through PATH by the shell.
+    if dvc.components().count() > 1 {
+        fs::metadata(dvc)?;
+    }
+    let dir = state_dir(root);
+    fs::create_dir_all(&dir)?;
+    forget(root);
+    File::create(dir.join(LOG_FILE))?;
+
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(WRAPPER)
+        .arg("sh")
+        .arg(dvc)
+        .args(&record.args)
         .current_dir(root)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // A piped Python stdout is block-buffered; without this, output appears only at exit.
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("DVC_TUI_LOG", dir.join(LOG_FILE))
+        .env("DVC_TUI_EXIT", dir.join(EXIT_FILE))
+        // A Python stdout that is not a terminal is block-buffered; without this, output appears
+        // only at exit.
         .env("PYTHONUNBUFFERED", "1")
         .env("NO_COLOR", "1")
         // Lead a new process group, so one signal can reach dvc *and* the stage command it starts.
-        .process_group(0);
-
-    let mut attempt = 1;
-    loop {
-        match command.spawn() {
-            // A file that was written a moment ago can still look "busy" to exec if another
-            // thread forked while it was open. It clears up almost immediately.
-            Err(e) if e.kind() == io::ErrorKind::ExecutableFileBusy && attempt < SPAWN_RETRIES => {
-                attempt += 1;
-                thread::sleep(Duration::from_millis(20));
-            }
-            result => return result,
-        }
+        .process_group(0)
+        .spawn()?;
+    let pgid = child.id();
+    record.pgid = pgid;
+    // Not fatal: without the record the run works, it just cannot be picked up again.
+    if let Ok(text) = serde_json::to_string_pretty(&record) {
+        let _ = fs::write(dir.join(RECORD_FILE), text);
     }
+    // Reap the wrapper when it ends, so it never lingers as a zombie while we are still running.
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    Ok(follow(&dir, pgid, tx))
 }
 
-fn spawn_pump(reader: impl Read + Send + 'static, tx: Sender<Event>) -> JoinHandle<()> {
-    thread::spawn(move || pump(reader, &tx))
-}
+/// Follow the run in `dir`: forward new log output and, when the exit status appears (or the run
+/// is found dead), announce the outcome.
+fn follow(dir: &Path, pgid: u32, tx: Sender<Event>) -> RunningJob {
+    let finished = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (finished_flag, cancelled_flag) = (Arc::clone(&finished), Arc::clone(&cancelled));
+    let (log_path, exit_path) = (dir.join(LOG_FILE), dir.join(EXIT_FILE));
 
-/// Forward everything `reader` produces as `Event::RunOutput`, until it is closed.
-fn pump(mut reader: impl Read, tx: &Sender<Event>) {
-    let mut pending: Vec<u8> = Vec::new();
-    let mut buffer = [0u8; 4096];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                pending.extend_from_slice(&buffer[..n]);
-                let text = drain_utf8(&mut pending);
-                if !text.is_empty() && tx.send(Event::RunOutput(text)).is_err() {
-                    return; // nobody is listening any more
+    thread::spawn(move || {
+        let mut tail = Tail::new(&log_path);
+        let mut last_alive_check = Instant::now();
+        loop {
+            if !tail.forward(&tx) {
+                return; // nobody is listening any more
+            }
+            let status = fs::read_to_string(&exit_path)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok());
+            // Without an exit status, check now and then that the run is still there.
+            let mut gone = false;
+            if status.is_none() && last_alive_check.elapsed() >= ALIVE_CHECK_INTERVAL {
+                last_alive_check = Instant::now();
+                gone = !group_is_ours(pgid);
+            }
+            if status.is_some() || gone {
+                // The exit file may be written just as the group dies: look once more.
+                let status = status.or_else(|| {
+                    fs::read_to_string(&exit_path)
+                        .ok()
+                        .and_then(|text| text.trim().parse().ok())
+                });
+                finished_flag.store(true, Ordering::SeqCst);
+                if !tail.forward(&tx) {
+                    return;
                 }
+                tail.finish(&tx);
+                let outcome = match status {
+                    _ if cancelled_flag.load(Ordering::SeqCst) => RunOutcome::Cancelled,
+                    Some(0) => RunOutcome::Succeeded,
+                    code => RunOutcome::Failed { code },
+                };
+                let _ = tx.send(Event::RunFinished(outcome));
+                return;
             }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            thread::sleep(FOLLOW_INTERVAL);
+        }
+    });
+
+    RunningJob {
+        pgid,
+        finished,
+        cancelled,
+    }
+}
+
+/// Reads a growing log file, sending what is new as `Event::RunOutput`.
+struct Tail {
+    path: PathBuf,
+    offset: u64,
+    /// Bytes of a UTF-8 character cut in half by the end of the file.
+    pending: Vec<u8>,
+}
+
+impl Tail {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_owned(),
+            offset: 0,
+            pending: Vec::new(),
         }
     }
-    if !pending.is_empty() {
-        let _ = tx.send(Event::RunOutput(
-            String::from_utf8_lossy(&pending).into_owned(),
-        ));
+
+    /// Send everything appended since the last call. `false` when the receiver is gone.
+    fn forward(&mut self, tx: &Sender<Event>) -> bool {
+        let Ok(mut file) = File::open(&self.path) else {
+            return true;
+        };
+        if file.seek(SeekFrom::Start(self.offset)).is_err() {
+            return true;
+        }
+        let mut buffer = Vec::new();
+        let Ok(read) = file.read_to_end(&mut buffer) else {
+            return true;
+        };
+        self.offset += read as u64;
+        self.pending.extend_from_slice(&buffer);
+        let text = drain_utf8(&mut self.pending);
+        text.is_empty() || tx.send(Event::RunOutput(text)).is_ok()
     }
+
+    /// Flush a trailing half character as `�` once nothing more will come.
+    fn finish(&mut self, tx: &Sender<Event>) {
+        if !self.pending.is_empty() {
+            let text = String::from_utf8_lossy(&self.pending).into_owned();
+            self.pending.clear();
+            let _ = tx.send(Event::RunOutput(text));
+        }
+    }
+}
+
+/// A run from an earlier session, found on startup.
+#[derive(Debug)]
+pub enum Attached {
+    /// Still going: its output so far and from now on arrive as events.
+    Running { record: RunRecord, job: RunningJob },
+    /// It ended while the interface was closed (or died without leaving a status).
+    Finished {
+        record: RunRecord,
+        log: String,
+        outcome: RunOutcome,
+        /// How long it ran, when that can be told.
+        duration: Option<Duration>,
+    },
+}
+
+/// Pick up the run an earlier session left behind in `root`, if any. A finished run is read in
+/// full and its files are removed (so it is reported once); a live one is followed from the start
+/// of its log.
+pub fn attach(root: &Path, tx: Sender<Event>) -> Option<Attached> {
+    let dir = state_dir(root);
+    let record: RunRecord =
+        serde_json::from_str(&fs::read_to_string(dir.join(RECORD_FILE)).ok()?).ok()?;
+    let exit_path = dir.join(EXIT_FILE);
+    let status = fs::read_to_string(&exit_path)
+        .ok()
+        .and_then(|text| text.trim().parse::<i32>().ok());
+
+    if status.is_none() && group_is_ours(record.pgid) {
+        return Some(Attached::Running {
+            job: follow(&dir, record.pgid, tx),
+            record,
+        });
+    }
+
+    let log = fs::read(dir.join(LOG_FILE))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    // The exit file is written when the run ends; failing that, the log's last write is the best guess.
+    let ended = fs::metadata(&exit_path)
+        .or_else(|_| fs::metadata(dir.join(LOG_FILE)))
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
+    let duration =
+        ended.map(|ended| Duration::from_millis(ended.saturating_sub(record.started_ms)));
+    let outcome = match status {
+        Some(0) => RunOutcome::Succeeded,
+        code => RunOutcome::Failed { code },
+    };
+    forget(root);
+    Some(Attached::Finished {
+        record,
+        log,
+        outcome,
+        duration,
+    })
+}
+
+/// Is `pgid` the wrapper of one of our runs? The process id alone is not enough: after a reboot
+/// the number may belong to something unrelated, which must never be signalled.
+fn group_is_ours(pgid: u32) -> bool {
+    if pgid == 0 {
+        return false;
+    }
+    if Path::new("/proc/self").exists() {
+        return fs::read(format!("/proc/{pgid}/cmdline"))
+            .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(MARKER));
+    }
+    // No /proc (not Linux): the best we can do is ask whether the group exists.
+    Command::new("kill")
+        .args(["-0", "--"])
+        .arg(format!("-{pgid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Take the valid UTF-8 from the front of `pending`. A multi-byte character cut in half by a
@@ -304,6 +530,10 @@ fn drain_utf8(pending: &mut Vec<u8>) -> String {
 /// Send a signal to a whole process group. The standard library cannot do this, and the `kill`
 /// program can, without any `unsafe` code. Errors are ignored: the group may already be gone.
 fn signal_group(pgid: u32, signal: &str) {
+    // Never signal a group that is not one of our runs (a recycled process id, for example).
+    if !group_is_ours(pgid) {
+        return;
+    }
     let _ = Command::new("kill")
         .args(["-s", signal, "--"])
         .arg(format!("-{pgid}"))
@@ -344,7 +574,7 @@ impl RunningJob {
         });
     }
 
-    /// Cancel and wait (up to `timeout`) until the process has really exited. Used when quitting.
+    /// Cancel and wait (up to `timeout`) until the process has really exited.
     pub fn terminate_blocking(&self, grace: Duration, timeout: Duration) -> bool {
         self.cancel_with_grace(grace);
         let deadline = Instant::now() + timeout;
@@ -352,16 +582,6 @@ impl RunningJob {
             thread::sleep(POLL_INTERVAL);
         }
         self.is_finished()
-    }
-}
-
-/// Safety net: if a job is dropped while its process still runs (for example during a panic),
-/// kill it rather than leave an orphan behind.
-impl Drop for RunningJob {
-    fn drop(&mut self) {
-        if !self.is_finished() {
-            signal_group(self.pgid, "KILL");
-        }
     }
 }
 
@@ -705,16 +925,192 @@ mod tests {
     }
 
     #[test]
-    fn dropping_a_running_job_kills_it() {
+    fn dropping_a_running_job_leaves_the_process_running() {
         let dir = tempfile::tempdir().unwrap();
         let dvc = fake_dvc(dir.path(), "sleep 60 &\necho $! > grandchild.pid\nwait");
         let (tx, _rx) = mpsc::channel();
         let job = start(&dvc, dir.path(), &[], tx).unwrap();
+        let pgid = job.pgid;
         let grandchild: u32 = wait_for_file(&dir.path().join("grandchild.pid"))
             .trim()
             .parse()
             .unwrap();
         drop(job);
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            !process_is_gone(grandchild),
+            "runs must outlive the interface"
+        );
+        signal_group(pgid, "KILL"); // clean up
         assert!(wait_until_gone(grandchild));
+    }
+
+    // ---- runs that outlive the interface ----
+
+    fn wait_for_exit_file(root: &Path) {
+        let path = state_dir(root).join(EXIT_FILE);
+        for _ in 0..200 {
+            if path.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the run never finished");
+    }
+
+    fn collect(rx: &mpsc::Receiver<Event>) -> (String, RunOutcome) {
+        let mut text = String::new();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)).expect("event") {
+                Event::RunOutput(chunk) => text.push_str(&chunk),
+                Event::RunFinished(outcome) => return (text, outcome),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    fn recorded(args: &[&str]) -> RunRecord {
+        RunRecord {
+            stage: "train".into(),
+            kind: "stage".into(),
+            ..RunRecord::plain(&args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>())
+        }
+    }
+
+    #[test]
+    fn a_later_session_follows_a_run_that_is_still_going() {
+        let dir = tempfile::tempdir().unwrap();
+        let dvc = fake_dvc(dir.path(), "echo first\nsleep 0.6\necho second");
+        let (tx, rx) = mpsc::channel();
+        let job = start_recorded(&dvc, dir.path(), recorded(&["repro", "train"]), tx).unwrap();
+        // "Quit": the first session goes away without stopping the run.
+        drop(job);
+        drop(rx);
+
+        let (tx2, rx2) = mpsc::channel();
+        let Some(Attached::Running { record, job: _job }) = attach(dir.path(), tx2) else {
+            panic!("the run should still be going");
+        };
+        assert_eq!(record.stage, "train");
+        assert_eq!(record.args, ["repro", "train"]);
+        let (text, outcome) = collect(&rx2);
+        assert!(
+            text.contains("first") && text.contains("second"),
+            "{text:?}: earlier output is replayed, later output follows"
+        );
+        assert_eq!(outcome, RunOutcome::Succeeded);
+    }
+
+    #[test]
+    fn a_run_that_finished_while_closed_is_reported_once_with_its_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let dvc = fake_dvc(dir.path(), "echo all done\nexit 3");
+        let (tx, _rx) = mpsc::channel();
+        let job = start_recorded(&dvc, dir.path(), recorded(&["repro"]), tx).unwrap();
+        wait_for_exit_file(dir.path());
+        drop(job);
+
+        let (tx2, _rx2) = mpsc::channel();
+        let Some(Attached::Finished {
+            record,
+            log,
+            outcome,
+            duration,
+        }) = attach(dir.path(), tx2.clone())
+        else {
+            panic!("expected a finished run");
+        };
+        assert_eq!(record.stage, "train");
+        assert!(log.contains("all done"), "{log:?}");
+        assert_eq!(outcome, RunOutcome::Failed { code: Some(3) });
+        assert!(duration.is_some());
+        assert!(attach(dir.path(), tx2).is_none(), "reported only once");
+    }
+
+    #[test]
+    fn a_run_that_died_without_a_status_is_reported_as_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let dvc = fake_dvc(dir.path(), "sleep 60");
+        let (tx, _rx) = mpsc::channel();
+        let job = start_recorded(&dvc, dir.path(), recorded(&["repro"]), tx).unwrap();
+        let pgid = job.pgid;
+        drop(job);
+        signal_group(pgid, "KILL");
+        assert!(wait_until_gone(pgid));
+
+        let (tx2, _rx2) = mpsc::channel();
+        let Some(Attached::Finished { outcome, .. }) = attach(dir.path(), tx2) else {
+            panic!("expected a finished run");
+        };
+        assert_eq!(outcome, RunOutcome::Failed { code: None });
+    }
+
+    #[test]
+    fn nothing_to_attach_to_is_none_and_a_damaged_record_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        assert!(attach(dir.path(), tx.clone()).is_none());
+        fs::create_dir_all(state_dir(dir.path())).unwrap();
+        fs::write(state_dir(dir.path()).join(RECORD_FILE), "{ broken").unwrap();
+        assert!(attach(dir.path(), tx).is_none());
+    }
+
+    #[test]
+    fn a_recycled_process_id_is_never_followed_or_signalled() {
+        let dir = tempfile::tempdir().unwrap();
+        // Some unrelated process whose id a stale record happens to name.
+        let mut stranger = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut record = recorded(&["repro"]);
+        record.pgid = stranger.id();
+        fs::create_dir_all(state_dir(dir.path())).unwrap();
+        fs::write(
+            state_dir(dir.path()).join(RECORD_FILE),
+            serde_json::to_string(&record).unwrap(),
+        )
+        .unwrap();
+
+        let (tx, _rx) = mpsc::channel();
+        let attached = attach(dir.path(), tx);
+        assert!(
+            matches!(attached, Some(Attached::Finished { .. })),
+            "{attached:?}"
+        );
+        signal_group(stranger.id(), "KILL"); // refused: not one of our runs
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            stranger.try_wait().unwrap().is_none(),
+            "the stranger must still be alive"
+        );
+        stranger.kill().unwrap();
+        stranger.wait().unwrap();
+    }
+
+    #[test]
+    fn a_followed_run_can_be_cancelled_from_the_later_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let dvc = fake_dvc(dir.path(), "sleep 60");
+        let (tx, _rx) = mpsc::channel();
+        drop(start_recorded(&dvc, dir.path(), recorded(&["repro"]), tx).unwrap());
+
+        let (tx2, rx2) = mpsc::channel();
+        let Some(Attached::Running { job, .. }) = attach(dir.path(), tx2) else {
+            panic!("expected a live run");
+        };
+        job.cancel();
+        let (_, outcome) = collect(&rx2);
+        assert_eq!(outcome, RunOutcome::Cancelled);
+    }
+
+    #[test]
+    fn starting_a_new_run_clears_the_files_of_the_previous_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let dvc = fake_dvc(dir.path(), "echo one");
+        let (tx, rx) = mpsc::channel();
+        start(&dvc, dir.path(), &[], tx.clone()).unwrap();
+        collect(&rx);
+        fs::write(&dvc, "#!/bin/sh\necho two\n").unwrap();
+        start(&dvc, dir.path(), &[], tx).unwrap();
+        let (text, _) = collect(&rx);
+        assert!(text.contains("two") && !text.contains("one"), "{text:?}");
     }
 }
