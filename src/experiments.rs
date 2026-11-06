@@ -352,10 +352,23 @@ pub fn fetch(dvc: &Path, root: &Path) -> Result<Table, String> {
             .status
             .code()
             .map_or("killed by a signal".to_owned(), |c| format!("exit {c}"));
-        return Err(format!("dvc exp show failed ({code}):\n{}", stderr.trim()));
+        return Err(failure_message(&code, &stderr));
     }
     parse(&String::from_utf8_lossy(&output.stdout))
         .map_err(|error| format!("could not read the output of `dvc exp show --json`: {error}"))
+}
+
+/// DVC's own error, plus advice for the one failure that every newcomer hits.
+fn failure_message(code: &str, stderr: &str) -> String {
+    let mut message = format!("dvc exp show failed ({code}):\n{}", stderr.trim());
+    if stderr.contains("Only supported for Git repositories") {
+        message.push_str(
+            "\n\nExperiments are stored in Git, so the project must be a Git repository:\n\
+             run `git init`, then commit it (`git add -A && git commit -m init`).\n\
+             To try the feature, build the demo copy: tests/fixtures/demo/make-git-demo.sh",
+        );
+    }
+    message
 }
 
 fn run_to_end(dvc: &Path, root: &Path) -> io::Result<Output> {
@@ -383,6 +396,26 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn non_git_failure_explains_how_to_get_experiments() {
+        let stderr = "ERROR: failed to show experiments - Only supported for Git repositories.";
+        let message = failure_message("exit 1", stderr);
+        assert!(
+            message.starts_with("dvc exp show failed (exit 1):"),
+            "{message}"
+        );
+        assert!(
+            message.contains("git init") && message.contains("make-git-demo.sh"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn other_failures_get_no_git_advice() {
+        let message = failure_message("exit 255", "ERROR: something else");
+        assert!(!message.contains("git init"), "{message}");
+    }
 
     fn sample(name: &str) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
