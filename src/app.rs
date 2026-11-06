@@ -1,10 +1,13 @@
 //! Application state and the one place that changes it.
 
+use std::{sync::mpsc::Sender, thread};
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
     graph::Graph,
     project::{Project, Stage},
+    stale::{self, StageStatus},
 };
 
 /// Everything that can happen to the app arrives as an `Event`.
@@ -12,6 +15,8 @@ use crate::{
 #[derive(Debug)]
 pub enum Event {
     Key(KeyEvent),
+    /// Result of a background stale check, indexed like `project.stages`.
+    Statuses(Vec<StageStatus>),
 }
 
 #[derive(Debug)]
@@ -20,6 +25,8 @@ pub struct App {
     pub graph: Graph,
     /// Position in the displayed (topological) order, *not* an index into `project.stages`.
     pub selected: usize,
+    /// `None` while the first stale check is still running.
+    pub statuses: Option<Vec<StageStatus>>,
     pub should_quit: bool,
 }
 
@@ -29,6 +36,7 @@ impl App {
             project,
             graph,
             selected: 0,
+            statuses: None,
             should_quit: false,
         }
     }
@@ -41,6 +49,26 @@ impl App {
     pub fn stage_at(&self, position: usize) -> Option<&Stage> {
         let index = *self.graph.order.get(position)?;
         self.project.stages.get(index)
+    }
+
+    /// The stale-check result for the stage shown at `position`, once it has arrived.
+    pub fn status_at(&self, position: usize) -> Option<&StageStatus> {
+        let index = *self.graph.order.get(position)?;
+        self.statuses.as_ref()?.get(index)
+    }
+
+    /// Check staleness on a background thread (hashing files can be slow) and report back
+    /// as `Event::Statuses`. The UI keeps running meanwhile.
+    pub fn spawn_status_check(&self, tx: &Sender<Event>) {
+        // The thread needs its own copies: it may outlive this call.
+        let project = self.project.clone();
+        let graph = self.graph.clone();
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let statuses = stale::compute(&project, &graph);
+            // Err means the app already quit; there is nobody left to tell.
+            let _ = tx.send(Event::Statuses(statuses));
+        });
     }
 
     pub fn selected_stage(&self) -> Option<&Stage> {
@@ -62,6 +90,7 @@ impl App {
     pub fn update(&mut self, event: Event) {
         match event {
             Event::Key(key) => self.on_key(key),
+            Event::Statuses(statuses) => self.statuses = Some(statuses),
         }
     }
 
@@ -110,6 +139,31 @@ mod tests {
         assert!(app.selected_upstream().is_empty()); // prepare
         app.selected = 2;
         assert_eq!(app.selected_upstream(), ["features"]); // train
+    }
+
+    #[test]
+    fn statuses_start_unknown_and_arrive_as_an_event() {
+        let mut app = app();
+        assert!(app.status_at(0).is_none());
+        app.update(Event::Statuses(stale::compute(&app.project, &app.graph)));
+        assert_eq!(app.status_at(0).unwrap().status(), stale::Status::UpToDate);
+        assert!(app.status_at(99).is_none());
+    }
+
+    #[test]
+    fn background_check_reports_through_the_channel() {
+        let mut app = app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.spawn_status_check(&tx);
+        let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        app.update(event);
+        let statuses = app.statuses.as_ref().expect("statuses delivered");
+        assert_eq!(statuses.len(), 3);
+        assert!(
+            statuses
+                .iter()
+                .all(|s| s.status() == stale::Status::UpToDate)
+        );
     }
 
     #[test]

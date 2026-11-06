@@ -23,7 +23,7 @@ pub const DEFAULT_PARAMS_FILE: &str = "params.yaml";
 // ---------------------------------------------------------------------------------------------
 
 /// A loaded DVC project.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Project {
     pub root: PathBuf,
     /// Stages in the order they are declared in `dvc.yaml`.
@@ -80,13 +80,13 @@ impl Cmd {
 }
 
 /// The contents of `dvc.lock`: what each stage looked like the last time it ran.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Lock {
     #[serde(default)]
     pub stages: BTreeMap<String, LockStage>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LockStage {
     pub cmd: Option<Cmd>,
     #[serde(default)]

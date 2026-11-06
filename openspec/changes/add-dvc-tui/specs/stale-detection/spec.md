@@ -7,7 +7,7 @@ Tell users which stages are out of date and why, by comparing the state recorded
 ## ADDED Requirements
 
 ### Requirement: Stage status indicator
-The system SHALL show one of three statuses for each stage in the list: up to date, stale, or never run.
+The system SHALL show one of four statuses for each stage in the list: up to date, stale, never run, or unverified (some input could not be checked).
 
 #### Scenario: Never run
 - **WHEN** a stage has no entry in `dvc.lock`
@@ -16,6 +16,10 @@ The system SHALL show one of three statuses for each stage in the list: up to da
 #### Scenario: Up to date
 - **WHEN** a stage's locked params, dep hashes and cmd all match the workspace
 - **THEN** it is shown as up to date
+
+#### Scenario: Unverified
+- **WHEN** a stage has no detected change but at least one dependency could not be verified
+- **THEN** it is shown as unverified, not as up to date
 
 #### Scenario: Missing lock file
 - **WHEN** the project has no `dvc.lock`
@@ -31,6 +35,17 @@ The system SHALL mark a stage stale when any param it tracks differs between `dv
 #### Scenario: Param file lacks the key
 - **WHEN** a tracked param key no longer exists in the param file
 - **THEN** the key is shown as removed and the stage is stale
+
+### Requirement: Added and removed dependencies
+The system SHALL mark a stage stale when its `deps` in `dvc.yaml` differ in membership from those recorded in `dvc.lock`.
+
+#### Scenario: Dependency added
+- **WHEN** `dvc.yaml` lists a dependency that `dvc.lock` does not record for the stage
+- **THEN** the stage is stale and that path is listed as a new dependency
+
+#### Scenario: Dependency removed
+- **WHEN** `dvc.lock` records a dependency that `dvc.yaml` no longer lists
+- **THEN** the stage is stale and that path is listed as removed
 
 ### Requirement: Dependency change detection
 The system SHALL mark a stage stale when the md5 of a tracked dependency file differs from the hash in `dvc.lock`, or when the file is missing.

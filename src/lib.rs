@@ -4,6 +4,7 @@ pub mod app;
 pub mod cli;
 pub mod graph;
 pub mod project;
+pub mod stale;
 pub mod ui;
 
 #[cfg(test)]

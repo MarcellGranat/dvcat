@@ -28,11 +28,11 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 
 ## 5. Stale detection
 
-- [ ] 5.1 Implement `Reason` and `stale_reasons` for never-run, cmd changed and param changed (including removed keys); verify unit tests, including the `download.limit: 3 → null` case
-- [ ] 5.2 Add md5 dependency checking (changed and missing files) and `DirUnverified` for directory deps; verify tests with temp files
-- [ ] 5.3 Add upstream propagation over topological order and the missing-`dvc.lock` case; verify tests
-- [ ] 5.4 Compute statuses off the UI thread, show status glyphs in the list and reasons in the detail pane; verify with a `TestBackend` test and a manual run on `articleIVdb` showing `download` as stale
-- [ ] 5.5 Cross-check against real DVC: a test or script comparing our verdict with `dvc status --json` on the fixture after editing a param, a dep and the cmd; verify the verdicts agree
+- [x] 5.1 Implement `Reason` and `stale_reasons` for never-run, cmd changed and param changed (including removed keys); verify unit tests, including the `download.limit: 3 → null` case
+- [x] 5.2 Add md5 dependency checking (changed and missing files) and `DirUnverified` for directory deps; verify tests with temp files
+- [x] 5.3 Add upstream propagation over topological order and the missing-`dvc.lock` case; verify tests
+- [x] 5.4 Compute statuses off the UI thread, show status glyphs in the list and reasons in the detail pane; verify with a `TestBackend` test and a manual run on `articleIVdb` showing `download` as stale
+- [x] 5.5 Cross-check against real DVC: a test or script comparing our verdict with `dvc status --json` on the fixture after editing a param, a dep and the cmd; verify the verdicts agree
 
 ## 6. Stage runs
 

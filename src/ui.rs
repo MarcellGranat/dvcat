@@ -11,9 +11,10 @@ use ratatui::{
 use crate::{
     app::App,
     project::{ParamRef, flatten_leaves, param_value},
+    stale::Status,
 };
 
-const HELP: &str = " j/k move   q quit ";
+const HELP: &str = " j/k move   q quit      ✓ up to date  ● stale  ○ never run  ? unverified ";
 /// Width of the label column in the detail pane ("depends", "metrics", ...).
 const LABEL_WIDTH: usize = 9;
 const WARNING: &str = "⚠";
@@ -33,10 +34,18 @@ pub fn view(app: &App, frame: &mut Frame) {
 
 fn render_stage_list(app: &App, frame: &mut Frame, area: ratatui::layout::Rect) {
     let items: Vec<ListItem> = (0..app.stage_count())
-        .filter_map(|position| app.stage_at(position))
-        .map(|stage| match stage.unsupported {
-            Some(_) => ListItem::new(format!("{} {WARNING}", stage.name)),
-            None => ListItem::new(stage.name.as_str()),
+        .filter_map(|position| {
+            let stage = app.stage_at(position)?;
+            let (glyph, _, color) = badge(app.status_at(position).map(|s| s.status()));
+            let warning = if stage.unsupported.is_some() {
+                format!(" {WARNING}")
+            } else {
+                String::new()
+            };
+            Some(ListItem::new(Line::from(vec![
+                Span::styled(glyph, Style::new().fg(color)),
+                Span::raw(format!(" {}{warning}", stage.name)),
+            ])))
         })
         .collect();
     let list = List::new(items)
@@ -65,6 +74,17 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
     };
 
     let mut lines = Vec::new();
+    let status = app.status_at(app.selected);
+    let (glyph, label, color) = badge(status.map(|s| s.status()));
+    lines.push(Line::from(vec![
+        label_span("status"),
+        Span::styled(format!("{glyph} {label}"), Style::new().fg(color)),
+    ]));
+    if let Some(status) = status {
+        let why = status.reasons.iter().map(ToString::to_string).collect();
+        lines.extend(section("why", why));
+    }
+    lines.push(Line::from(""));
     lines.extend(section("cmd", vec![stage.cmd.clone()]));
 
     let upstream: Vec<String> = app
@@ -101,6 +121,24 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
+fn label_span(label: &str) -> Span<'static> {
+    Span::styled(
+        format!("{label:<LABEL_WIDTH$}"),
+        Style::new().add_modifier(Modifier::DIM | Modifier::BOLD),
+    )
+}
+
+/// Glyph, text and colour for a status; `None` means the check has not finished yet.
+fn badge(status: Option<Status>) -> (&'static str, &'static str, Color) {
+    match status {
+        None => ("…", "checking", Color::DarkGray),
+        Some(Status::UpToDate) => ("✓", "up to date", Color::Green),
+        Some(Status::Stale) => ("●", "stale", Color::Yellow),
+        Some(Status::NeverRun) => ("○", "never run", Color::Gray),
+        Some(Status::Unverified) => ("?", "unverified", Color::Magenta),
+    }
+}
+
 /// One labelled block: the label sits on the first line, values are listed one per line below it.
 /// An empty `values` produces no lines at all.
 fn section(label: &str, values: Vec<String>) -> Vec<Line<'static>> {
@@ -109,13 +147,7 @@ fn section(label: &str, values: Vec<String>) -> Vec<Line<'static>> {
         .enumerate()
         .map(|(i, value)| {
             let label = if i == 0 { label } else { "" };
-            Line::from(vec![
-                Span::styled(
-                    format!("{label:<LABEL_WIDTH$}"),
-                    Style::new().add_modifier(Modifier::DIM | Modifier::BOLD),
-                ),
-                Span::raw(value),
-            ])
+            Line::from(vec![label_span(label), Span::raw(value)])
         })
         .collect()
 }
@@ -149,7 +181,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
-    use crate::test_support::{app_with_files, demo_app};
+    use crate::test_support::{app_at, app_with_files, demo_app, fixture, with_statuses};
 
     /// Draw into an in-memory terminal and return its rows as plain text.
     fn render(app: &App, width: u16, height: u16) -> Vec<String> {
@@ -177,8 +209,45 @@ mod tests {
         let (_dir, app) = app_with_files(&[("dvc.yaml", yaml)]);
         let rows = render(&app, 100, 20);
         // Row 0 is the border; rows 1.. are list items.
-        assert!(rows[1].starts_with("│▶ features"), "{rows:#?}");
-        assert!(rows[2].starts_with("│  train"), "{rows:#?}");
+        // No stale-check result has arrived yet, so each row shows the pending marker.
+        assert!(rows[1].starts_with("│▶ … features"), "{rows:#?}");
+        assert!(rows[2].starts_with("│  … train"), "{rows:#?}");
+    }
+
+    #[test]
+    fn list_and_detail_show_pending_state_until_statuses_arrive() {
+        let text = screen(&demo_app());
+        assert!(text.contains("status   … checking"), "{text}");
+    }
+
+    #[test]
+    fn up_to_date_stages_get_a_check_mark() {
+        let mut app = with_statuses(demo_app());
+        let rows = render(&app, 100, 20);
+        assert!(rows[1].starts_with("│▶ ✓ prepare"), "{rows:#?}");
+        assert!(rows[3].starts_with("│  ✓ train"), "{rows:#?}");
+        app.selected = 2;
+        assert!(screen(&app).contains("status   ✓ up to date"));
+    }
+
+    #[test]
+    fn never_run_stage_gets_an_open_circle_and_reason() {
+        let (_dir, app) = app_with_files(&[("dvc.yaml", "stages:\n  a:\n    cmd: x\n")]);
+        let app = with_statuses(app);
+        let text = screen(&app);
+        assert!(text.contains("○ a"), "{text}");
+        assert!(text.contains("status   ○ never run"), "{text}");
+        assert!(text.contains("why      never run"), "{text}");
+    }
+
+    #[test]
+    fn stale_stage_shows_the_param_change_on_screen() {
+        let app = with_statuses(app_at(&fixture("articleiv")));
+        let text = screen(&app);
+        assert!(text.contains("● download"), "{text}");
+        assert!(text.contains("status   ● stale"), "{text}");
+        // (This fixture has no source files, so "missing:" reasons appear above it.)
+        assert!(text.contains("download.limit: 3 → null"), "{text}");
     }
 
     #[test]

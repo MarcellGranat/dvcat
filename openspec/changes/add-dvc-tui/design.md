@@ -77,6 +77,9 @@ tests/fixtures/  throwaway three-stage DVC repo
 - [Own stale logic disagrees with DVC] → Treat it as advisory, flag unverifiable cases, add a later option to cross-check with `dvc status --json`; fixture tests compare against real `dvc status` output.
 - [`dvc repro` holds the repo lock; other `dvc` calls fail meanwhile] → Disable experiments refresh during a run and show why.
 - [DVC progress output uses `\r` and ANSI codes] → Split on `\r`, strip ANSI sequences; keep scrollback bounded.
+- [Our md5 differs from DVC's for text files with CRLF line endings, since DVC normalises them] → Known gap: such a dep may show as changed; `tests/dvc_cross_check.rs` is the guard, and a later task can add normalisation.
+- [Modified or missing *outputs* are not checked, though `dvc status` reports them] → Out of scope for v1; the stage view says "up to date" about inputs only.
+- [Propagating staleness downstream is conservative: `dvc repro` skips a downstream stage if the upstream output turns out unchanged] → Intentional per spec; the reason text says "upstream: <stage>".
 - [Unix-only process groups] → Documented v1 limitation.
 - [`foreach`/`matrix` stages, `vars`, `${}` interpolation] → Not expanded in v1; such stages are shown as-is and flagged unsupported.
 - [Large `dvc.lock` or many stages] → Hashing runs off the UI thread; results arrive as events.

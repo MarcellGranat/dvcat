@@ -42,7 +42,9 @@ fn main() -> Result<()> {
 
 fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
     let (tx, rx) = mpsc::channel();
-    spawn_key_thread(tx); // `tx` is *moved* into the function: we can't use it here any more
+    // Each producer gets its own clone of the sender; `tx` stays here for later jobs.
+    spawn_key_thread(tx.clone());
+    app.spawn_status_check(&tx);
 
     while !app.should_quit {
         // The closure borrows `app` immutably; the borrow ends when `draw` returns...

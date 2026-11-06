@@ -5,6 +5,7 @@ run a stage with a live log, and compare experiments. Written in Rust with [rata
 
 > **Status:** under construction. The change plan lives in `openspec/changes/add-dvc-tui/`.
 > Features below are marked *(planned)* until they are implemented.
+> Working today: pipeline list, detail pane, stale detection with reasons.
 
 ## Run
 
@@ -14,17 +15,21 @@ cargo run -- [PROJECT_DIR]      # PROJECT_DIR defaults to the current directory
 
 `dvc` is looked up in `$DVC_TUI_DVC`, then `<PROJECT_DIR>/.venv/bin/dvc`, then `PATH`.
 
-## Keys *(planned)*
+## Keys
 
 | Key        | Action                                   |
 |------------|------------------------------------------|
 | `j` / `k`  | move selection down / up                 |
-| `r`        | run selected stage only (`dvc repro --single-item`) |
-| `R`        | run selected stage with stale upstream (`dvc repro`) |
-| `x`        | cancel the running stage                 |
-| `e`        | experiments view                         |
-| `F5`       | refresh experiments                      |
 | `q`        | quit                                     |
+| `r` *(planned)* | run selected stage only (`dvc repro --single-item`) |
+| `R` *(planned)* | run selected stage with stale upstream (`dvc repro`) |
+| `x` *(planned)* | cancel the running stage            |
+| `e` *(planned)* | experiments view                    |
+| `F5` *(planned)* | refresh experiments                |
+
+## Status glyphs
+
+`✓` up to date · `●` stale (the detail pane says why) · `○` never run · `?` unverified (e.g. a directory dependency) · `…` still checking.
 
 ## Demo project
 
@@ -38,5 +43,9 @@ tests/fixtures/demo/regen.sh
 ## Develop
 
 ```sh
-cargo fmt && cargo clippy -- -D warnings && cargo test
+cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 ```
+
+`tests/dvc_cross_check.rs` compares our stale detection with the real `dvc status --json`.
+It needs DVC: `DVC_BIN=/path/to/dvc cargo test --test dvc_cross_check`
+(without DVC it prints `SKIPPED` and passes).

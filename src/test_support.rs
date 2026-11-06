@@ -7,7 +7,7 @@ use std::{
 
 use tempfile::TempDir;
 
-use crate::{app::App, graph, project::Project};
+use crate::{app::App, graph, project::Project, stale};
 
 pub fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -35,4 +35,24 @@ pub fn app_with_files(files: &[(&str, &str)]) -> (TempDir, App) {
     }
     let app = app_at(dir.path());
     (dir, app)
+}
+
+/// Recursively copy `src` into the (existing) directory `dst`.
+pub fn copy_dir(src: &Path, dst: &Path) {
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let target = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            fs::create_dir_all(&target).unwrap();
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// Fill in the stale-check result synchronously (the real app does this on a background thread).
+pub fn with_statuses(mut app: App) -> App {
+    app.statuses = Some(stale::compute(&app.project, &app.graph));
+    app
 }
