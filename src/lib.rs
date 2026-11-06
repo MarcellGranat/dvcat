@@ -4,6 +4,7 @@ pub mod app;
 pub mod cli;
 pub mod experiments;
 pub mod files;
+pub mod form;
 pub mod graph;
 pub mod log;
 pub mod project;

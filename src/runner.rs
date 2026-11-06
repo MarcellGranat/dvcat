@@ -101,6 +101,20 @@ pub fn repro_args(stage: &str, with_upstream: bool) -> Vec<String> {
     args
 }
 
+/// `dvc exp run --temp [-n NAME] -S file:key=value ...`.
+/// `--temp` runs in an isolated copy of the workspace, so experiments do not inherit each
+/// other's params and the workspace stays as it is.
+pub fn exp_run_args(name: Option<&str>, overrides: &[(String, String)]) -> Vec<String> {
+    let mut args: Vec<String> = ["exp", "run", "--temp"].map(String::from).into();
+    if let Some(name) = name {
+        args.extend(["-n".to_owned(), name.to_owned()]);
+    }
+    for (key, value) in overrides {
+        args.extend(["-S".to_owned(), format!("{key}={value}")]);
+    }
+    args
+}
+
 // ---------------------------------------------------------------------------------------------
 // Running
 // ---------------------------------------------------------------------------------------------
@@ -407,6 +421,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let error = find_dvc(dir.path(), None, None).unwrap_err();
         assert!(error.to_string().contains("PATH (0 directories)"));
+    }
+
+    #[test]
+    fn exp_run_args_name_and_override_params() {
+        assert_eq!(exp_run_args(None, &[]), ["exp", "run", "--temp"]);
+        let overrides = [("params.yaml:train.lr".to_owned(), "0.2".to_owned())];
+        assert_eq!(
+            exp_run_args(Some("lr-020"), &overrides),
+            [
+                "exp",
+                "run",
+                "--temp",
+                "-n",
+                "lr-020",
+                "-S",
+                "params.yaml:train.lr=0.2"
+            ]
+        );
     }
 
     #[test]

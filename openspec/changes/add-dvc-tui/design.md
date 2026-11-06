@@ -64,6 +64,10 @@ Typed serde structs for the parts of `exp show --json` we use, with `Option` and
 *Alternatives:* a built-in editor (large scope); preview only (no way to edit params); a theme config file (non-goal in v1).
 Git demo: the fixture cannot contain a `.git`, so `make-git-demo.sh` builds a Git copy with three `dvc exp run --temp` experiments (`--temp` isolates them from each other's params).
 
+### 8d. New experiment form
+`form.rs` holds the form as pure state: a name and a `FormField` (label `file:key`, original, value) per param column, with `on_key` returning a `FormAction` (`Continue`, `Cancel`, `Submit{label, args}`). Only changed fields become `-S` overrides, built by `runner::exp_run_args`, which always passes `--temp` so runs do not inherit each other's params or touch the workspace. Submitting stores the arguments in `App::run` (`Run` now carries its `args`, so stage runs and experiment runs share one start/stream/cancel path) and switches to the pipeline view, where the log pane lives. When an experiment run ends, the app asks for a fresh `exp show` (the repository lock is free again). Like the preview, the form is modal.
+*Alternatives:* free-text `key=value` input (error-prone, no discovery of param names); a separate log pane in the experiments view (more layout for little gain).
+
 ### 9. Dependencies
 `ratatui` (re-exports `crossterm`), `serde` + `serde_json`, one maintained YAML crate for serde, `anyhow`, `md-5`. Dev: `tempfile`. A panic hook and a drop guard restore the terminal on every exit path.
 

@@ -13,6 +13,7 @@ mod experiments;
 use crate::{
     app::{App, Focus, Run, RunPhase, View},
     files::{FileEntry, FileKind, Preview, PreviewBody},
+    form::ExperimentForm,
     project::{ParamRef, flatten_leaves, param_value},
     runner::RunOutcome,
     stale::Status,
@@ -49,10 +50,18 @@ const PREVIEW_KEYS: &[(&str, &str)] = &[
     ("o", "editor"),
     ("Esc", "close"),
 ];
+const FORM_KEYS: &[(&str, &str)] = &[
+    ("Tab/Shift+Tab", "next/previous field"),
+    ("type", "edit"),
+    ("Ctrl+U", "clear field"),
+    ("Enter", "run"),
+    ("Esc", "cancel"),
+];
 const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("j/k", "row"),
     ("h/l", "column"),
     ("s", "sort"),
+    ("n", "new experiment"),
     ("F5", "refresh"),
     ("x", "cancel run"),
     ("e/Esc", "pipeline"),
@@ -101,6 +110,14 @@ pub fn view(app: &App, frame: &mut Frame) {
         Some(preview) => {
             render_preview(preview, frame, main);
             PREVIEW_KEYS
+        }
+        None => keys,
+    };
+
+    let keys = match &app.form {
+        Some(form) => {
+            render_form(form, frame, main);
+            FORM_KEYS
         }
         None => keys,
     };
@@ -395,6 +412,94 @@ fn render_preview(preview: &Preview, frame: &mut Frame, area: Rect) {
         .style(Style::new().fg(theme::TEXT).bg(theme::BASE))
         .block(block);
     frame.render_widget(paragraph, popup);
+}
+
+/// The "new experiment" popup: a name and one line per param, the active one highlighted.
+fn render_form(form: &ExperimentForm, frame: &mut Frame, area: Rect) {
+    // name + fields + a line for the command preview or error; plus the border.
+    let wanted = (form.fields.len() as u16 + 1) + 1 + 2;
+    let width = (area.width * 80 / 100).max(30).min(area.width);
+    let height = wanted.max(6).min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+
+    let title = if form.base.is_empty() {
+        "New experiment".to_owned()
+    } else {
+        format!("New experiment · values from {}", form.base)
+    };
+    let block = pane(title, true).border_style(Style::new().fg(theme::MAUVE));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let [rows_area, status_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+    // Row 0 is the name; the others are the params. Scroll so the active row stays visible.
+    let label_width = form
+        .fields
+        .iter()
+        .map(|field| field.label.chars().count())
+        .chain(["name".len()])
+        .max()
+        .unwrap_or(4)
+        .min(34);
+    let visible = usize::from(rows_area.height).max(1);
+    let start = (form.active + 1).saturating_sub(visible);
+    let row = |index: usize, label: &str, value: &str, original: Option<&str>| {
+        let active = index == form.active;
+        let changed = original.is_some_and(|original| original != value);
+        let value_style = if changed {
+            Style::new().fg(theme::PEACH).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme::TEXT)
+        };
+        let mut spans = vec![
+            Span::styled(
+                if active { "▌ " } else { "  " },
+                Style::new().fg(theme::MAUVE),
+            ),
+            Span::styled(format!("{label:<label_width$}  "), theme::label()),
+            Span::styled(value.to_owned(), value_style),
+        ];
+        if active {
+            spans.push(Span::styled("▏", Style::new().fg(theme::MAUVE)));
+        }
+        if changed {
+            spans.push(Span::styled(
+                format!("  (was {})", original.unwrap_or_default()),
+                theme::muted(),
+            ));
+        }
+        let line = Line::from(spans);
+        if active {
+            line.style(theme::selected())
+        } else {
+            line
+        }
+    };
+    let mut lines = vec![row(0, "name", &form.name, None)];
+    for (i, field) in form.fields.iter().enumerate() {
+        lines.push(row(
+            i + 1,
+            &field.label,
+            &field.value,
+            Some(&field.original),
+        ));
+    }
+    let shown: Vec<Line> = lines.into_iter().skip(start).take(visible).collect();
+    frame.render_widget(Paragraph::new(shown), rows_area);
+
+    let status = match (&form.error, form.command_preview()) {
+        (Some(error), _) => Line::styled(format!("⚠ {error}"), Style::new().fg(theme::RED)),
+        (None, Some(command)) => Line::styled(command, Style::new().fg(theme::TEAL)),
+        (None, None) => Line::from(""),
+    };
+    frame.render_widget(Paragraph::new(status), status_area);
 }
 
 fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
@@ -977,5 +1082,85 @@ mod tests {
     fn header_shows_the_running_stage() {
         let app = app_with_run("x\n", RunPhase::Running);
         assert!(render(&app, 100, 20)[0].contains("● running train"));
+    }
+
+    fn app_with_form() -> App {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/exp_show/two.json");
+        let table = crate::experiments::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let row = table.rows.iter().find(|r| r.label == "master").unwrap();
+        let mut app = demo_app();
+        app.view = View::Experiments;
+        app.form = Some(ExperimentForm::from_table(&table, Some(row)));
+        app.experiments.data = Some(Ok(table));
+        app
+    }
+
+    #[test]
+    fn form_popup_lists_the_name_and_every_param_with_its_value() {
+        let text = screen_at(&app_with_form(), 24);
+        for expected in [
+            "New experiment · values from master",
+            "name",
+            "params.yaml:train.lr",
+            "0.01",
+            "params.yaml:train.epochs",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
+        // The popup replaces the table's key hints with its own.
+        let last = render(&app_with_form(), 100, 24)[23].clone();
+        assert!(
+            last.contains("Enter run") && last.contains("Esc cancel"),
+            "{last}"
+        );
+    }
+
+    #[test]
+    fn form_marks_changes_and_previews_the_command() {
+        let mut app = app_with_form();
+        let form = app.form.as_mut().unwrap();
+        form.name = "lr-020".into();
+        form.active = 1 + form
+            .fields
+            .iter()
+            .position(|f| f.label == "params.yaml:train.lr")
+            .unwrap();
+        let field = &mut form.fields[form.active - 1];
+        field.value = "0.2".into();
+        let text = screen_at(&app, 24);
+        assert!(text.contains("(was 0.01)"), "{text}");
+        assert!(
+            text.contains("0.2▏"),
+            "cursor after the active value:\n{text}"
+        );
+        assert!(
+            text.contains("dvc exp run --temp -n lr-020 -S params.yaml:train.lr=0.2"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn form_shows_the_error_instead_of_the_command() {
+        let mut app = app_with_form();
+        let form = app.form.as_mut().unwrap();
+        form.error = Some("name may only contain letters".into());
+        let text = screen_at(&app, 24);
+        assert!(text.contains("⚠ name may only contain letters"), "{text}");
+        assert!(!text.contains("dvc exp run"), "{text}");
+    }
+
+    #[test]
+    fn form_survives_tiny_terminals_and_scrolls_to_the_active_field() {
+        let mut app = app_with_form();
+        for (w, h) in [(10, 4), (30, 6), (1, 1)] {
+            let _ = render(&app, w, h); // must not panic
+        }
+        // With room for only two rows, the last field must still be visible when it is active.
+        let last = app.form.as_ref().unwrap().fields.len();
+        app.form.as_mut().unwrap().active = last;
+        let final_label = app.form.as_ref().unwrap().fields[last - 1].label.clone();
+        let text = screen_at(&app, 8);
+        assert!(text.contains(&final_label), "{text}");
     }
 }

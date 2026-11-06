@@ -53,3 +53,27 @@ The system SHALL fetch experiments without blocking the interface, and SHALL sho
 #### Scenario: Refresh
 - **WHEN** the user presses `F5` in the experiments view
 - **THEN** the experiments are fetched again
+
+### Requirement: New experiment form
+The system SHALL let the user start a new experiment from the experiments view: a form with an optional name and one editable value per param column, pre-filled from the row under the cursor, that runs `dvc exp run --temp` with a `-S file:key=value` override for each changed value.
+
+#### Scenario: Form pre-filled
+- **WHEN** the user presses `n` on a row of a loaded table
+- **THEN** a form opens with that row's param values, and the command that would run is shown and updates as fields change
+
+#### Scenario: Only changes are passed
+- **WHEN** the user changes `train.lr` and submits
+- **THEN** the command contains a single `-S params.yaml:train.lr=<value>` and no override for unchanged params
+
+#### Scenario: Invalid input
+- **WHEN** the name has characters other than letters, digits, `-`, `_` or `.`, or a changed value is empty
+- **THEN** the form stays open and says what to fix
+
+#### Scenario: Run and reload
+- **WHEN** the form is submitted
+- **THEN** the live log of the run is shown, and when it ends (in any way except failing to start) the experiments table is reloaded
+
+#### Scenario: Unavailable
+- **WHEN** a stage or experiment is already running, or the table is not loaded
+- **THEN** no form opens and a notice says why
+

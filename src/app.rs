@@ -12,6 +12,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::{
     experiments::{self, Sort, Table},
     files::{self, FileEntry, Preview},
+    form::{ExperimentForm, FormAction},
     graph::Graph,
     log::LogBuffer,
     project::{Project, Stage},
@@ -82,6 +83,8 @@ pub enum Effect {
         stage: String,
         with_upstream: bool,
     },
+    /// Start `dvc exp run`; the arguments are already stored in `App::run`.
+    StartExperiment,
     CancelRun,
     /// Re-read `dvc.lock` and recompute every stage's status.
     RefreshStatuses,
@@ -104,7 +107,11 @@ pub enum RunPhase {
 /// The most recent run (kept on screen after it ends, until the next one replaces it).
 #[derive(Debug)]
 pub struct Run {
+    /// What ran: a stage name, or `exp <name>` for an experiment.
     pub stage: String,
+    /// The `dvc` arguments, shown in the log title and used to start the process.
+    pub args: Vec<String>,
+    pub is_experiment: bool,
     pub with_upstream: bool,
     pub log: LogBuffer,
     pub phase: RunPhase,
@@ -115,8 +122,25 @@ pub struct Run {
 
 impl Run {
     pub fn new(stage: String, with_upstream: bool) -> Self {
+        let args = runner::repro_args(&stage, with_upstream);
+        Self::with_args(stage, args, with_upstream, false)
+    }
+
+    /// An experiment run; `label` is shown in the header.
+    pub fn experiment(label: String, args: Vec<String>) -> Self {
+        Self::with_args(label, args, false, true)
+    }
+
+    fn with_args(
+        stage: String,
+        args: Vec<String>,
+        with_upstream: bool,
+        is_experiment: bool,
+    ) -> Self {
         Self {
             stage,
+            args,
+            is_experiment,
             with_upstream,
             log: LogBuffer::new(),
             phase: RunPhase::Running,
@@ -130,10 +154,7 @@ impl Run {
     }
 
     pub fn command_line(&self) -> String {
-        format!(
-            "dvc {}",
-            runner::repro_args(&self.stage, self.with_upstream).join(" ")
-        )
+        format!("dvc {}", self.args.join(" "))
     }
 }
 
@@ -149,6 +170,8 @@ pub struct App {
     pub view: View,
     pub experiments: ExperimentsView,
     pub focus: Focus,
+    /// The open "new experiment" form, if any. Like the preview, it is modal.
+    pub form: Option<ExperimentForm>,
     /// Cursor in the files pane, an index into [`App::selected_files`].
     pub file_cursor: usize,
     /// The open preview popup, if any. While it is open it receives all keys.
@@ -173,6 +196,7 @@ impl App {
             view: View::Pipeline,
             experiments: ExperimentsView::default(),
             focus: Focus::Stages,
+            form: None,
             file_cursor: 0,
             preview: None,
             editor_request: None,
@@ -270,6 +294,9 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return Vec::new();
+        }
+        if self.form.is_some() {
+            return self.on_form_key(key);
         }
         // An open popup is modal: it gets every key, so `q` closes it instead of quitting.
         if self.preview.is_some() {
@@ -402,12 +429,56 @@ impl App {
                 self.experiments.column = self.experiments.column.saturating_sub(1);
             }
             KeyCode::Char('s') => self.sort_by_cursor_column(),
+            KeyCode::Char('n') => self.open_experiment_form(),
             KeyCode::F(5) => return self.request_experiments(),
             KeyCode::Esc => self.view = View::Pipeline,
             _ => {}
         }
         self.clamp_experiments_cursor();
         Vec::new()
+    }
+
+    /// Open the form with the values of the row under the cursor.
+    fn open_experiment_form(&mut self) {
+        if self.is_running() {
+            self.notice = Some("a run is already in progress (x cancels it)".to_owned());
+            return;
+        }
+        let Some(table) = self.experiments.table() else {
+            self.notice = Some("experiments are not available (press F5 to load them)".to_owned());
+            return;
+        };
+        let rows = table.ordered(&self.experiments.sort);
+        let row = rows.get(self.experiments.row).copied();
+        self.form = Some(ExperimentForm::from_table(table, row));
+    }
+
+    fn on_form_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        // Ask before borrowing `self.form` mutably: `is_running` borrows all of `self`.
+        let running = self.is_running();
+        let Some(form) = &mut self.form else {
+            return Vec::new();
+        };
+        match form.on_key(key) {
+            FormAction::Continue => Vec::new(),
+            FormAction::Cancel => {
+                self.form = None;
+                Vec::new()
+            }
+            FormAction::Submit { label, args } => {
+                if running {
+                    form.error = Some("a run is already in progress (x cancels it)".to_owned());
+                    return Vec::new();
+                }
+                self.form = None;
+                self.run = Some(Run::experiment(label, args));
+                // The log pane lives in the pipeline view, so show it.
+                self.view = View::Pipeline;
+                self.notice =
+                    Some("experiment started; press e for the table when it ends".to_owned());
+                vec![Effect::StartExperiment]
+            }
+        }
     }
 
     fn sort_by_cursor_column(&mut self) {
@@ -478,14 +549,19 @@ impl App {
         run.log.finish();
         run.job = None; // the process is gone; dropping the handle is now harmless
         let refresh = !matches!(outcome, RunOutcome::NotStarted(_));
+        let was_experiment = run.is_experiment;
         run.phase = RunPhase::Finished(outcome);
+        let mut effects = Vec::new();
         if refresh {
             // Whatever ran may have rewritten dvc.lock, so earlier results are out of date.
             self.statuses = None;
-            vec![Effect::RefreshStatuses]
-        } else {
-            Vec::new()
+            effects.push(Effect::RefreshStatuses);
+            if was_experiment {
+                // A new row may have appeared. (The lock is free again: the run is over.)
+                effects.extend(self.request_experiments());
+            }
         }
+        effects
     }
 
     fn scroll_log_back(&mut self) {
@@ -513,7 +589,11 @@ impl App {
             Effect::StartRun {
                 stage,
                 with_upstream,
-            } => self.start_run(&stage, with_upstream, tx),
+            } => {
+                let _ = (stage, with_upstream); // already stored in `self.run.args`
+                self.start_job(tx);
+            }
+            Effect::StartExperiment => self.start_job(tx),
             Effect::CancelRun => {
                 if let Some(job) = self.run.as_ref().and_then(|run| run.job.as_ref()) {
                     job.cancel();
@@ -567,9 +647,12 @@ impl App {
         }
     }
 
-    fn start_run(&mut self, stage: &str, with_upstream: bool, tx: &Sender<Event>) {
+    /// Start the process described by the current `self.run`.
+    fn start_job(&mut self, tx: &Sender<Event>) {
         let root = self.project.root.clone();
-        let args = runner::repro_args(stage, with_upstream);
+        let Some(args) = self.run.as_ref().map(|run| run.args.clone()) else {
+            return;
+        };
         let started = (self.dvc_lookup)(&root)
             .map_err(|error| error.to_string())
             .and_then(|dvc| {
@@ -1325,6 +1408,163 @@ mod experiments_view_tests {
             h.press(code);
         }
         assert_eq!((h.app.experiments.row, h.app.experiments.column), (0, 0));
+    }
+
+    // ----- the "new experiment" form -----
+
+    fn type_text(h: &mut Harness, text: &str) {
+        for c in text.chars() {
+            h.press(KeyCode::Char(c));
+        }
+    }
+
+    fn with_table_loaded() -> Harness {
+        let mut h = serving_two();
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+        h
+    }
+
+    fn calls(h: &Harness) -> Vec<String> {
+        fs::read_to_string(h.dir.path().join("calls.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn n_opens_a_form_filled_from_the_row_under_the_cursor() {
+        let mut h = with_table_loaded();
+        h.press(KeyCode::Char('j')); // master (the baseline)
+        h.press(KeyCode::Char('n'));
+        let form = h.app.form.as_ref().expect("form open");
+        assert_eq!(form.base, "master");
+        assert!(
+            form.fields
+                .iter()
+                .any(|f| f.label == "params.yaml:train.lr" && f.value == "0.01")
+        );
+    }
+
+    #[test]
+    fn n_needs_loaded_experiments_and_no_active_run() {
+        let mut h = serving_two();
+        h.app.view = View::Experiments;
+        h.press(KeyCode::Char('n'));
+        assert!(h.app.form.is_none());
+        assert!(h.app.notice.as_deref().unwrap().contains("F5"));
+
+        let mut h = with_table_loaded();
+        h.app.run = Some(Run::new("a".into(), false));
+        h.press(KeyCode::Char('n'));
+        assert!(h.app.form.is_none());
+        assert!(
+            h.app
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("already in progress")
+        );
+    }
+
+    #[test]
+    fn the_form_is_modal_and_esc_closes_it() {
+        let mut h = with_table_loaded();
+        h.press(KeyCode::Char('n'));
+        type_text(&mut h, "qe"); // would quit / leave the view
+        assert!(!h.app.should_quit);
+        assert_eq!(h.app.view, View::Experiments);
+        assert_eq!(h.app.form.as_ref().unwrap().name, "qe");
+        h.press(KeyCode::Esc);
+        assert!(h.app.form.is_none());
+        assert_eq!(h.app.view, View::Experiments);
+    }
+
+    #[test]
+    fn submitting_runs_dvc_exp_run_shows_the_log_and_reloads_the_table() {
+        let mut h = with_table_loaded();
+        h.press(KeyCode::Char('j')); // master
+        h.press(KeyCode::Char('n'));
+        type_text(&mut h, "my-exp");
+        let lr = h
+            .app
+            .form
+            .as_ref()
+            .unwrap()
+            .fields
+            .iter()
+            .position(|f| f.label == "params.yaml:train.lr")
+            .unwrap();
+        for _ in 0..=lr {
+            h.press(KeyCode::Tab);
+        }
+        for _ in 0..4 {
+            h.press(KeyCode::Backspace); // "0.01"
+        }
+        type_text(&mut h, "0.2");
+        let effects = h.press(KeyCode::Enter);
+
+        assert_eq!(effects, [Effect::StartExperiment]);
+        assert!(h.app.form.is_none());
+        assert_eq!(h.app.view, View::Pipeline, "the log pane lives there");
+        let run = h.app.run.as_ref().unwrap();
+        assert!(run.is_experiment && run.is_active());
+        assert_eq!(
+            run.command_line(),
+            "dvc exp run --temp -n my-exp -S params.yaml:train.lr=0.2"
+        );
+
+        // Let the fake process finish; the app then asks for fresh experiments.
+        let deadline = Instant::now() + WAIT;
+        while h.app.is_running() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let event = h.rx.recv_timeout(left).expect("run never finished");
+            h.app.dispatch(event, &h.tx);
+        }
+        assert!(h.app.experiments.loading, "a refetch was requested");
+        h.wait_for_data();
+        assert!(
+            calls(&h).contains(&"exp run --temp -n my-exp -S params.yaml:train.lr=0.2".to_owned())
+        );
+        assert_eq!(h.fetch_count(), 2);
+    }
+
+    #[test]
+    fn a_failed_experiment_is_reported_and_still_reloads_the_table() {
+        let mut h = harness("echo boom >&2; exit 3");
+        // Seed the table from the sample file so the form can open.
+        let json = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/exp_show/two.json");
+        let table = experiments::parse(&fs::read_to_string(json).unwrap()).unwrap();
+        h.app.experiments.data = Some(Ok(table));
+        h.app.view = View::Experiments;
+        h.press(KeyCode::Char('n'));
+        h.press(KeyCode::Enter);
+        let deadline = Instant::now() + WAIT;
+        while h.app.is_running() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let event = h.rx.recv_timeout(left).expect("run never finished");
+            h.app.dispatch(event, &h.tx);
+        }
+        let run = h.app.run.as_ref().unwrap();
+        assert_eq!(
+            run.phase,
+            RunPhase::Finished(RunOutcome::Failed { code: Some(3) })
+        );
+        assert!(run.log.lines().any(|l| l.contains("boom")));
+        assert!(h.app.experiments.loading);
+    }
+
+    #[test]
+    fn invalid_input_keeps_the_form_open_with_a_message() {
+        let mut h = with_table_loaded();
+        h.press(KeyCode::Char('n'));
+        type_text(&mut h, "bad name");
+        let effects = h.press(KeyCode::Enter);
+        assert!(effects.is_empty());
+        assert!(h.app.form.as_ref().unwrap().error.is_some());
+        assert!(h.app.run.is_none());
     }
 }
 

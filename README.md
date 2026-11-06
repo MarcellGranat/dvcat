@@ -5,7 +5,7 @@ run a stage with a live log, and compare experiments. Written in Rust with [rata
 
 > **Status:** under construction. The change plan lives in `openspec/changes/add-dvc-tui/`.
 > Features below are marked *(planned)* until they are implemented.
-> Working today: pipeline list, detail pane, files pane with preview and editor, stale detection with reasons, running and cancelling stages, an experiments table. The look is [Catppuccin Mocha](https://catppuccin.com) and needs a true-colour terminal.
+> Working today: pipeline list, detail pane, files pane with preview and editor, stale detection with reasons, running and cancelling stages, an experiments table with a new-experiment form. The look is [Catppuccin Mocha](https://catppuccin.com) and needs a true-colour terminal.
 
 ## Run
 
@@ -35,6 +35,11 @@ If none is found, pressing `r` explains where it looked.
 | `h` / `l`  | *(experiments)* move the column cursor   |
 | `s`        | *(experiments)* sort by the cursor column; again flips the direction |
 | `F5`       | *(experiments)* reload with `dvc exp show --json` |
+| `n`        | *(experiments)* new experiment: a form with a name and every param, pre-filled from the row under the cursor |
+
+**New experiment form.** `Tab`/`Shift+Tab` move between the fields, typing edits, `Ctrl+U` clears a field and `Enter` runs it.
+Only the values you changed become `-S` overrides, and the command that will run is shown at the bottom of the form.
+It runs `dvc exp run --temp` (an isolated copy, so your workspace is untouched), switches to the pipeline view to show the live log, and reloads the table when the run ends.
 
 The files pane lists what the selected stage reads and writes (deps, param files, outs, metrics).
 A preview shows at most the first 64 KiB of a file; directories are listed and binary files are not dumped.
