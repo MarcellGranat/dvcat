@@ -49,6 +49,9 @@ pub enum Event {
     PreviewLoaded(Preview),
 }
 
+/// How often the lock file is re-read to notice `dvc` runs started elsewhere.
+const EXTERNAL_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+
 /// A yes/no question shown before something destructive. Modal, like the preview and the form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirm {
@@ -318,6 +321,9 @@ pub struct App {
     /// The open "new experiment" form, if any. Like the preview, it is modal.
     pub form: Option<ExperimentForm>,
     pub confirm: Option<Confirm>,
+    /// `dvc` processes started outside dvcat that hold this project's lock (refreshed by [`App::tick`]).
+    pub external: Vec<external::ExternalRun>,
+    external_checked: Option<Instant>,
     pub prompt: Option<Prompt>,
     /// The latest finished run of each stage started from this session (DVC keeps no durations).
     pub last_runs: BTreeMap<String, LastRun>,
@@ -354,6 +360,8 @@ impl App {
             focus: Focus::Stages,
             form: None,
             confirm: None,
+            external: Vec::new(),
+            external_checked: None,
             prompt: None,
             last_runs: BTreeMap::new(),
             experiment_times: BTreeMap::new(),
@@ -549,6 +557,10 @@ impl App {
             }
             // Stopping a run makes sense from either view.
             KeyCode::Char('x') => self.request_cancel(),
+            KeyCode::Char('X') => {
+                self.ask_to_stop_external();
+                Vec::new()
+            }
             code => match self.view {
                 View::Pipeline => self.on_pipeline_key(code),
                 View::Experiments => self.on_experiments_key(code),
@@ -1008,6 +1020,42 @@ impl App {
             }
         }
         effects
+    }
+
+    /// Called every time the main loop wakes up: look again for outside `dvc` runs, at most once
+    /// per [`EXTERNAL_CHECK_INTERVAL`].
+    pub fn tick(&mut self) {
+        if self
+            .external_checked
+            .is_some_and(|at| at.elapsed() < EXTERNAL_CHECK_INTERVAL)
+        {
+            return;
+        }
+        self.external_checked = Some(Instant::now());
+        self.external = external::iter_external_runs(&self.project.root).collect();
+    }
+
+    /// The outside run working on the stage at `position`, if any.
+    pub fn external_on(&self, position: usize) -> Option<&external::ExternalRun> {
+        let stage = self.stage_at(position)?;
+        self.external
+            .iter()
+            .find(|run| run.works_on(&self.project.root, &stage.name, stage.produced()))
+    }
+
+    /// `X`: ask whether to stop the outside runs that are holding the project.
+    fn ask_to_stop_external(&mut self) {
+        self.tick_now();
+        if self.external.is_empty() {
+            self.notice = Some("no dvc process outside dvcat is running here".to_owned());
+        } else {
+            self.confirm = Some(blocked_confirm(&self.external));
+        }
+    }
+
+    fn tick_now(&mut self) {
+        self.external_checked = None;
+        self.tick();
     }
 
     /// If the finished run failed because other `dvc` processes hold the lock, those processes.
@@ -1491,6 +1539,7 @@ mod run_tests {
         h.app.confirm = Some(blocked_confirm(&[external::ExternalRun {
             pid: child.id(),
             command: "dvc repro".into(),
+            writes: Vec::new(),
         }]));
         h.press(KeyCode::Char('y'));
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1498,6 +1547,63 @@ mod run_tests {
             assert!(Instant::now() < deadline, "the other dvc is still running");
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// A live process that looks like `dvc repro one`, recorded in DVC's lock as writing `out.csv`.
+    fn outside_dvc(h: &Harness) -> std::process::Child {
+        let other = h.dir.path().join("dvc");
+        fs::write(&other, "#!/bin/sh\nsleep 60 &\nwait\n").unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o755)).unwrap();
+        let child = std::process::Command::new(&other)
+            .args(["repro", "a"])
+            .spawn()
+            .unwrap();
+        fs::create_dir_all(h.dir.path().join(".dvc/tmp")).unwrap();
+        let lock = format!(
+            r#"{{"read": {{}}, "write": {{"{}/a.txt": {{"pid": {}, "cmd": "dvc repro a"}}}}}}"#,
+            h.dir.path().display(),
+            child.id()
+        );
+        fs::write(h.dir.path().join(".dvc/tmp/rwlock"), lock).unwrap();
+        child
+    }
+
+    #[test]
+    fn an_outside_run_is_noticed_without_any_failure_and_marks_its_stage() {
+        let mut h = harness("exit 0");
+        assert!(h.app.external.is_empty());
+        let mut child = outside_dvc(&h);
+        h.app.tick();
+        assert_eq!(h.app.external.len(), 1);
+        let marked: Vec<bool> = (0..h.app.stage_count())
+            .map(|i| h.app.external_on(i).is_some())
+            .collect();
+        assert_eq!(marked, [true, false], "only stage a is being worked on");
+        assert!(h.app.confirm.is_none(), "noticing must not interrupt");
+
+        // Capital X asks; n leaves it be; the process ends when we agree.
+        h.press(KeyCode::Char('X'));
+        assert_eq!(h.app.confirm.as_ref().unwrap().kill, [child.id()]);
+        h.press(KeyCode::Char('n'));
+        assert!(child.try_wait().unwrap().is_none());
+        h.press(KeyCode::Char('X'));
+        h.press(KeyCode::Char('y'));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "still running");
+            thread::sleep(Duration::from_millis(20));
+        }
+        // Once it is gone the next look finds nothing.
+        h.app.tick_now();
+        assert!(h.app.external.is_empty());
+    }
+
+    #[test]
+    fn x_with_no_outside_run_says_so() {
+        let mut h = harness("exit 0");
+        h.press(KeyCode::Char('X'));
+        assert!(h.app.confirm.is_none());
+        assert!(h.app.notice.as_deref().unwrap().contains("no dvc process"));
     }
 
     #[test]

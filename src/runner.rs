@@ -223,7 +223,7 @@ const LOG_FILE: &str = "dvcat-run.log";
 const EXIT_FILE: &str = "dvcat-run.exit";
 /// Appears in the wrapper's command line, which is how a live run is recognised (and a recycled
 /// process id is not mistaken for it).
-const MARKER: &str = "dvcat_run";
+pub(crate) const MARKER: &str = "dvcat_run";
 /// Runs `"$@"` with its output appended to a file and writes the exit status to another, so both
 /// outlive the interface. `trap :` keeps the wrapper alive when the group gets SIGTERM, so it can
 /// still record the status (a handler, unlike "ignore", is reset by `exec` in the children).

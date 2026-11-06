@@ -3,7 +3,6 @@
 //! and offers to stop them.
 
 use std::{
-    collections::BTreeSet,
     fs,
     path::Path,
     process::{Command, Stdio},
@@ -24,9 +23,43 @@ pub struct ExternalRun {
     pub pid: u32,
     /// The command DVC recorded, e.g. `.../bin/dvc repro pdf2md`.
     pub command: String,
+    /// The paths it holds a write lock on, as DVC recorded them (absolute).
+    pub writes: Vec<String>,
 }
 
 impl ExternalRun {
+    /// How long the process has been running (the age of its `/proc` entry).
+    pub fn age(&self) -> Option<Duration> {
+        fs::metadata(format!("/proc/{}", self.pid))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+    }
+
+    /// Does this run touch the stage? Either it was asked for by name (`dvc repro <stage>`), or
+    /// it holds a write lock on something the stage produces (`produced`, relative to `root`).
+    pub fn works_on<'a>(
+        &self,
+        root: &Path,
+        stage: &str,
+        mut produced: impl Iterator<Item = &'a str>,
+    ) -> bool {
+        let named = self
+            .command
+            .split_whitespace()
+            .skip_while(|word| *word != "repro")
+            .skip(1)
+            .any(|word| word == stage);
+        named
+            || produced.any(|path| {
+                let full = root.join(path.trim_end_matches('/'));
+                self.writes.iter().any(|held| {
+                    let held = Path::new(held);
+                    full.starts_with(held) || held.starts_with(&full)
+                })
+            })
+    }
+
     /// A short form for messages: the command without the directory of the executable.
     pub fn short_command(&self) -> String {
         let mut words = self.command.split_whitespace();
@@ -44,16 +77,15 @@ pub fn log_mentions_lock(log: &str) -> bool {
     log.contains(BLOCKED_TEXT)
 }
 
-/// The processes named in the text of `.dvc/tmp/rwlock`, each once.
+/// The processes named in the text of `.dvc/tmp/rwlock`, each once, with the paths they write.
 pub fn iter_lock_holders(text: &str) -> impl Iterator<Item = ExternalRun> {
-    let mut seen = BTreeSet::new();
-    let mut found = Vec::new();
+    let mut found: Vec<ExternalRun> = Vec::new();
     if let Ok(Value::Object(root)) = serde_json::from_str::<Value>(text) {
-        for section in root.values() {
+        for (kind, section) in &root {
             let Value::Object(files) = section else {
                 continue;
             };
-            for holders in files.values() {
+            for (file, holders) in files {
                 // "read" maps a file to a list of holders, "write" to a single one.
                 let list: Vec<&Value> = match holders {
                     Value::Array(items) => items.iter().collect(),
@@ -62,19 +94,31 @@ pub fn iter_lock_holders(text: &str) -> impl Iterator<Item = ExternalRun> {
                 for holder in list {
                     let pid = holder.get("pid").and_then(Value::as_u64);
                     let command = holder.get("cmd").and_then(Value::as_str);
-                    if let (Some(pid), Some(command)) = (pid, command)
-                        && let Ok(pid) = u32::try_from(pid)
-                        && seen.insert(pid)
-                    {
-                        found.push(ExternalRun {
-                            pid,
-                            command: command.to_owned(),
-                        });
+                    let (Some(pid), Some(command)) = (pid, command) else {
+                        continue;
+                    };
+                    let Ok(pid) = u32::try_from(pid) else {
+                        continue;
+                    };
+                    let index = match found.iter().position(|run| run.pid == pid) {
+                        Some(index) => index,
+                        None => {
+                            found.push(ExternalRun {
+                                pid,
+                                command: command.to_owned(),
+                                writes: Vec::new(),
+                            });
+                            found.len() - 1
+                        }
+                    };
+                    if kind == "write" {
+                        found[index].writes.push(file.clone());
                     }
                 }
             }
         }
     }
+    found.sort_by_key(|run| run.pid);
     found.into_iter()
 }
 
@@ -99,11 +143,39 @@ fn is_live_dvc(pid: u32) -> bool {
             .any(|word| word.rsplit('/').next() == Some("dvc"))
 }
 
-/// The live `dvc` processes that hold the lock of the project in `root`.
+/// Was `pid` started by dvcat? Its runs go through a wrapper whose command line carries a marker.
+fn started_by_dvcat(pid: u32) -> bool {
+    let mut current = pid;
+    for _ in 0..32 {
+        let Ok(bytes) = fs::read(format!("/proc/{current}/cmdline")) else {
+            return false;
+        };
+        if String::from_utf8_lossy(&bytes).contains(crate::runner::MARKER) {
+            return true;
+        }
+        let parent = fs::read_to_string(format!("/proc/{current}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit(')')
+                    .next()?
+                    .split_whitespace()
+                    .nth(1)?
+                    .parse::<u32>()
+                    .ok()
+            });
+        match parent {
+            Some(parent) if parent > 1 => current = parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The live `dvc` processes that hold the lock of the project in `root`, other than dvcat's own.
 pub fn iter_external_runs(root: &Path) -> impl Iterator<Item = ExternalRun> {
     let text = fs::read_to_string(root.join(".dvc/tmp/rwlock")).unwrap_or_default();
     iter_lock_holders(&text)
-        .filter(|holder| is_live_dvc(holder.pid))
+        .filter(|holder| is_live_dvc(holder.pid) && !started_by_dvcat(holder.pid))
         .collect::<Vec<_>>()
         .into_iter()
 }
@@ -200,6 +272,23 @@ mod tests {
         let holders: Vec<_> = iter_lock_holders(LOCK).collect();
         assert_eq!(holders.iter().map(|h| h.pid).collect::<Vec<_>>(), [7, 9]);
         assert_eq!(holders[1].short_command(), "dvc repro pdf2md");
+        assert_eq!(holders[1].writes, ["out"]);
+        assert!(holders[0].writes.is_empty());
+    }
+
+    #[test]
+    fn a_run_is_matched_to_stages_by_name_or_by_written_paths() {
+        let run = ExternalRun {
+            pid: 1,
+            command: "/v/bin/dvc repro -f pdf2md".into(),
+            writes: vec!["/p/data/md_files".into()],
+        };
+        let root = Path::new("/p");
+        assert!(run.works_on(root, "pdf2md", std::iter::empty()));
+        assert!(run.works_on(root, "other", ["data/md_files/"].into_iter()));
+        assert!(run.works_on(root, "other", ["data"].into_iter()));
+        assert!(!run.works_on(root, "other", ["data/layout"].into_iter()));
+        assert!(!run.works_on(root, "other", ["pdf2md_errors.jsonl"].into_iter()));
     }
 
     #[test]

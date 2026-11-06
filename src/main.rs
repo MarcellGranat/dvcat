@@ -78,6 +78,7 @@ fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<Option<String>> {
 
     while !app.should_quit {
         // The closure borrows `app` immutably; the borrow ends when `draw` returns...
+        app.tick();
         terminal.draw(|frame| ui::view(&app, frame))?;
         // ...so we may borrow it mutably here.
         match rx.recv_timeout(POLL_INTERVAL) {

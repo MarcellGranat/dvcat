@@ -53,6 +53,7 @@ If none is found, pressing `r` explains where it looked.
 | `r`        | run the selected stage only (`dvc repro --single-item`) |
 | `R`        | run it with stale upstream stages (`dvc repro`) |
 | `x`        | cancel the running stage (from either view) |
+| `X`        | stop a `dvc` process started outside dvcat (asks first) |
 | `PgUp` / `PgDn` | scroll the log                      |
 | `1` `2` `3` | pipeline / graph / experiments view (also `g` for the graph, `e` for the experiments) |
 | `e`        | switch between the pipeline and the experiments table |
@@ -103,9 +104,11 @@ is still going. Start `dvcat` in the same project again and the run is shown wit
 (its time counts from the real start; `x` still cancels it). A run that finished while the interface was closed is shown once,
 with its log, outcome and duration. To stop a run, press `x` first. The state lives in `.dvc/tmp/dvcat-run.*` (`.dvcat/` if there is no `.dvc`).
 
-If a run fails because a `dvc` process that dvcat did not start (another terminal, another tool) holds DVC's lock,
-dvcat reads `.dvc/tmp/rwlock`, names the live process, and asks whether to stop it (`y`/`n`). Stopping sends SIGTERM to that
-process and what it started, and SIGKILL after 5 seconds. Its output cannot be followed, because dvcat has no access to it.
+A `dvc` process that dvcat did not start (another terminal, another tool) is noticed every couple of seconds from
+`.dvc/tmp/rwlock`: the header names it (`⚠ outside dvcat: dvc repro pdf2md · 44m`), and stages it works on get a
+`⚠ running outside dvcat` marker (matched by the stage named on its command line, or by outputs it holds a write lock on).
+Press `X` to stop it: after a `y` it gets SIGTERM, together with what it started, and SIGKILL after 5 seconds.
+A run of yours that fails on the lock opens the same question by itself. Its output cannot be followed, because dvcat has no access to it.
 
 ## Run times
 

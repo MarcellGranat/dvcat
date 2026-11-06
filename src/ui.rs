@@ -218,6 +218,23 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             Style::new().fg(theme::PEACH),
         ));
     }
+    if let Some(run) = app.external.first() {
+        let age = run
+            .age()
+            .map(|d| format!(" · {}", format_duration(d)))
+            .unwrap_or_default();
+        let more = match app.external.len() {
+            1 => String::new(),
+            n => format!(" (+{})", n - 1),
+        };
+        left.push(Span::styled(
+            format!(
+                "  ⚠ outside dvcat: {}{age}{more} · X stops it",
+                run.short_command()
+            ),
+            Style::new().fg(theme::YELLOW),
+        ));
+    }
 
     let tab = |label: &'static str, active: bool| {
         if active {
@@ -335,7 +352,12 @@ fn render_stage_list(app: &App, frame: &mut Frame, area: Rect) {
             } else {
                 String::new()
             };
-            let left = format!(" {}{warning}", stage.name);
+            let outside = if app.external_on(position).is_some() {
+                " ⚠ running outside dvcat"
+            } else {
+                ""
+            };
+            let left = format!(" {}{warning}{outside}", stage.name);
             let mut spans = vec![
                 Span::styled(glyph, Style::new().fg(color)),
                 Span::raw(left.clone()),
@@ -1322,6 +1344,19 @@ mod tests {
         let final_label = app.form.as_ref().unwrap().fields[last - 1].label.clone();
         let text = screen_at(&app, 8);
         assert!(text.contains(&final_label), "{text}");
+    }
+
+    #[test]
+    fn an_outside_run_is_named_in_the_header() {
+        let mut app = demo_app();
+        app.external = vec![crate::external::ExternalRun {
+            pid: 1,
+            command: "/v/bin/dvc repro pdf2md".into(),
+            writes: Vec::new(),
+        }];
+        let text = render(&app, 140, 24).join("\n");
+        assert!(text.contains("outside dvcat: dvc repro pdf2md"), "{text}");
+        assert!(text.contains("X stops it"), "{text}");
     }
 
     #[test]
