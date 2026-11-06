@@ -39,7 +39,7 @@
 - [x] 6.1 Add layer assignment and ordering (barycenter sweep) with virtual nodes for layer-skipping edges; verify unit tests on chain, fork, join, diamond and skip-layer graphs
 - [x] 6.2 Add the direction-bit canvas, track allocation and box/arrow drawing; verify golden-string tests for the same graphs, including crossings
 - [x] 6.3 Add the `g` view: status colours, cursor navigation along edges and layers, scrolling, Enter to jump, `r`/`R` to run, empty-project state; verify `App` key tests and `TestBackend` tests
-- [x] 6.4 Manual pass on the demo and on `articleIVdb` (read-only) at several terminal sizes; update README keys and legend
+- [x] 6.4 Manual pass on the demo and on a real-world project (read-only) at several terminal sizes; update README keys and legend
 
 ## 7a. Run times and view numbers
 

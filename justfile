@@ -1,7 +1,7 @@
 # Common tasks. Run `just` to list them.
 
-# Which dvc to use: $DVC_TUI_DVC, else `dvc` on PATH, else the articleIVdb virtualenv. Edit the last part for your machine.
-dvc := env("DVC_TUI_DVC", `command -v dvc || echo "$HOME/projects/articleIVdb/.venv/bin/dvc"`)
+# Which dvc to use: $DVC_TUI_DVC, otherwise `dvc` from PATH.
+dvc := env("DVC_TUI_DVC", "dvc")
 demo_dir := env("DVC_TUI_DEMO_DIR", "/tmp/dvc-tui-git-demo")
 
 default:

@@ -17,7 +17,7 @@ just demo-reset   # rebuild the Git demo from scratch
 just check        # fmt + clippy + tests
 ```
 
-`just` finds `dvc` via `$DVC_TUI_DVC`, then `PATH`, then `~/projects/articleIVdb/.venv/bin/dvc` (edit the `dvc` line in `justfile`).
+`just` uses the `dvc` named by `$DVC_TUI_DVC`, or else the one on your `PATH`.
 
 ## Run
 
@@ -143,3 +143,7 @@ cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 It needs DVC: `DVC_BIN=/path/to/dvc cargo test --test dvc_cross_check`;
 `tests/git_demo.rs` builds the Git demo and reads its experiments the same way
 (without DVC it prints `SKIPPED` and passes).
+
+## License
+
+MIT, see `LICENSE`.

@@ -16,7 +16,7 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 
 ## 3. Loading the pipeline
 
-- [x] 3.1 Implement serde types and loaders for `dvc.yaml`, `dvc.lock` and param files (JSON, YAML); verify unit tests parse the fixture and a copy of the `articleIVdb` files
+- [x] 3.1 Implement serde types and loaders for `dvc.yaml`, `dvc.lock` and param files (JSON, YAML); verify unit tests parse the fixture and a copy of a real-world project files
 - [x] 3.2 Implement CLI arg handling (project path, default `.`) and the error cases: missing `dvc.yaml`, malformed YAML with file path in the message; verify with tests for both errors
 - [x] 3.3 Implement graph building (outs → deps path-prefix matching), Kahn topological sort and cycle reporting; verify tests cover ordering, nested paths and a cycle
 
@@ -24,14 +24,14 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 
 - [x] 4.1 Render the stage list with the dependency names of the selected stage; verify with a ratatui `TestBackend` snapshot of the fixture
 - [x] 4.2 Render the detail pane (cmd, deps, params with current values, outs) and update on selection change; verify a `TestBackend` test for a stage with params
-- [x] 4.3 Run the app against `~/projects/articleIVdb` read-only and the fixture; verify both display correctly by hand
+- [x] 4.3 Run the app against a real-world project read-only and the fixture; verify both display correctly by hand
 
 ## 5. Stale detection
 
 - [x] 5.1 Implement `Reason` and `stale_reasons` for never-run, cmd changed and param changed (including removed keys); verify unit tests, including the `download.limit: 3 → null` case
 - [x] 5.2 Add md5 dependency checking (changed and missing files) and `DirUnverified` for directory deps; verify tests with temp files
 - [x] 5.3 Add upstream propagation over topological order and the missing-`dvc.lock` case; verify tests
-- [x] 5.4 Compute statuses off the UI thread, show status glyphs in the list and reasons in the detail pane; verify with a `TestBackend` test and a manual run on `articleIVdb` showing `download` as stale
+- [x] 5.4 Compute statuses off the UI thread, show status glyphs in the list and reasons in the detail pane; verify with a `TestBackend` test and a manual run on a real-world project showing `download` as stale
 - [x] 5.5 Cross-check against real DVC: a test or script comparing our verdict with `dvc status --json` on the fixture after editing a param, a dep and the cmd; verify the verdicts agree
 
 ## 6. Stage runs
@@ -45,7 +45,7 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 
 ## 7. Experiments table
 
-- [x] 7.1 Implement serde types for `exp show --json` and the pure table model (column union, `file:key` labels, empty cells); verify unit tests on a captured sample from `articleIVdb` and one with metrics from the fixture
+- [x] 7.1 Implement serde types for `exp show --json` and the pure table model (column union, `file:key` labels, empty cells); verify unit tests on a captured sample from a real-world project and one with metrics from the fixture
 - [x] 7.2 Implement sorting (numeric vs text, empty last, asc/desc toggle); verify unit tests
 - [x] 7.3 Add the experiments view with background fetch, loading indicator, error display, `F5` refresh, and disable-during-run message; verify with `TestBackend` tests and a manual run
 

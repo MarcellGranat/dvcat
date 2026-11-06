@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn stale_stage_shows_the_param_change_on_screen() {
-        let app = with_statuses(app_at(&fixture("articleiv")));
+        let app = with_statuses(app_at(&fixture("downloader")));
         let text = screen(&app);
         assert!(text.contains("● download"), "{text}");
         assert!(text.contains("status   ● stale"), "{text}");
@@ -937,7 +937,7 @@ mod tests {
 
     #[test]
     fn tracked_section_is_expanded_into_one_line_per_leaf() {
-        let app = crate::test_support::app_at(&crate::test_support::fixture("articleiv"));
+        let app = crate::test_support::app_at(&crate::test_support::fixture("downloader"));
         let rows = render(&app, 100, 20);
         let text = rows.join("\n");
         assert!(

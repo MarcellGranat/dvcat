@@ -2,6 +2,12 @@
 name = "dvc_tui"
 version = "0.1.0"
 edition = "2024"
+description = "A minimal, modern terminal UI for DVC: browse the pipeline, see what is stale and why, run stages and experiments"
+license = "MIT"
+repository = "https://github.com/MarcellGranat/dvc-tui"
+readme = "README.md"
+keywords = ["dvc", "tui", "mlops"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.104"

@@ -381,8 +381,8 @@ mod tests {
     }
 
     #[test]
-    fn loads_articleiv_files_with_whole_section_params() {
-        let root = fixture("articleiv");
+    fn loads_downloader_files_with_whole_section_params() {
+        let root = fixture("downloader");
         let project = Project::load(&root).unwrap();
         assert_eq!(project.stages.len(), 1);
         let download = &project.stages[0];
@@ -481,8 +481,8 @@ stages:
         assert_eq!(param_value(tree, "train.nope"), None);
         assert_eq!(param_value(tree, "nope.lr"), None);
 
-        let articleiv = Project::load(&fixture("articleiv")).unwrap();
-        let tree = articleiv.params["params.json"].as_ref().unwrap();
+        let downloader = Project::load(&fixture("downloader")).unwrap();
+        let tree = downloader.params["params.json"].as_ref().unwrap();
         assert_eq!(param_value(tree, "download.limit"), Some(&Value::Null));
     }
 

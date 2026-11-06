@@ -523,8 +523,8 @@ mod tests {
     }
 
     #[test]
-    fn articleiv_download_limit_3_to_null_is_the_headline_case() {
-        let (project, statuses) = statuses(&fixture("articleiv"));
+    fn downloader_download_limit_3_to_null_is_the_headline_case() {
+        let (project, statuses) = statuses(&fixture("downloader"));
         let download = of(&project, &statuses, "download");
         assert_eq!(download.status(), Status::Stale);
         assert!(

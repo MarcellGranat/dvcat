@@ -28,4 +28,4 @@ DVC is CLI-only: understanding a pipeline means juggling `dvc dag`, `dvc status`
 - New cargo project in this repo (currently empty); no existing code affected.
 - Dependencies: `ratatui`, `crossterm`, `serde`, a maintained YAML crate, `serde_json`, `anyhow`; `md-5` for dependency hashing.
 - Runtime dependency on the `dvc` CLI, located on `PATH` or in the project's `.venv/bin`.
-- Test fixtures: a throwaway three-stage DVC repo with a metrics file; `~/projects/articleIVdb` is used read-only for manual checks.
+- Test fixtures: a throwaway three-stage DVC repo with a metrics file; a real-world project is used read-only for manual checks.

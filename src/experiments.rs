@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn no_metrics_anywhere_means_no_metric_columns_and_no_failure() {
-        // The shape articleIVdb produces: params but `metrics: {}`.
+        // The shape of a project that tracks params but no metrics: `metrics: {}`.
         let json = json!([{"rev": "workspace", "name": null, "error": null, "experiments": null,
             "data": {"timestamp": null, "metrics": {}, "params": {"p.yaml": {"data": {"a": 1}}}}}]);
         let table = parse(&json.to_string()).unwrap();

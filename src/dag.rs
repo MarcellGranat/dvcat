@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn real_projects_lay_out_without_panicking() {
-        for fixture in ["demo", "matrix", "articleiv"] {
+        for fixture in ["demo", "matrix", "downloader"] {
             let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures")
                 .join(fixture);

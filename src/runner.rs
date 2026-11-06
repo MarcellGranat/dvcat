@@ -29,6 +29,8 @@ pub const KILL_GRACE: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// How often the log file is read for new output.
 const FOLLOW_INTERVAL: Duration = Duration::from_millis(40);
+/// Attempts (5 ms apart) to find the marker in a process's command line.
+const CMDLINE_RETRIES: usize = 60;
 /// How often a run without an exit status is checked for being alive.
 const ALIVE_CHECK_INTERVAL: Duration = Duration::from_millis(400);
 
@@ -207,6 +209,9 @@ pub struct RunningJob {
     /// Set once the run is over (its exit status was read, or it is known to be gone).
     finished: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
+    /// Started by this session, so the process id is known to be ours. A run found from an earlier
+    /// session is not trusted: its id is checked before it is ever signalled.
+    trusted: bool,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -305,17 +310,24 @@ pub fn start_recorded(
     if let Ok(text) = serde_json::to_string_pretty(&record) {
         let _ = fs::write(dir.join(RECORD_FILE), text);
     }
-    // Reap the wrapper when it ends, so it never lingers as a zombie while we are still running.
+    // Reap the wrapper when it ends, so it never lingers as a zombie while we are still running,
+    // and remember that it ended: for our own child that is the reliable "it is gone" signal.
+    let exited = Arc::new(AtomicBool::new(false));
+    let exited_flag = Arc::clone(&exited);
     thread::spawn(move || {
         let _ = child.wait();
+        exited_flag.store(true, Ordering::SeqCst);
     });
 
-    Ok(follow(&dir, pgid, tx))
+    Ok(follow(&dir, pgid, tx, Some(exited)))
 }
 
 /// Follow the run in `dir`: forward new log output and, when the exit status appears (or the run
 /// is found dead), announce the outcome.
-fn follow(dir: &Path, pgid: u32, tx: Sender<Event>) -> RunningJob {
+/// `exited` is set by whoever reaps the process when it is our own child; for a run from an
+/// earlier session it is `None` and liveness is judged from `/proc`.
+fn follow(dir: &Path, pgid: u32, tx: Sender<Event>, exited: Option<Arc<AtomicBool>>) -> RunningJob {
+    let trusted = exited.is_some();
     let finished = Arc::new(AtomicBool::new(false));
     let cancelled = Arc::new(AtomicBool::new(false));
     let (finished_flag, cancelled_flag) = (Arc::clone(&finished), Arc::clone(&cancelled));
@@ -335,7 +347,10 @@ fn follow(dir: &Path, pgid: u32, tx: Sender<Event>) -> RunningJob {
             let mut gone = false;
             if status.is_none() && last_alive_check.elapsed() >= ALIVE_CHECK_INTERVAL {
                 last_alive_check = Instant::now();
-                gone = !group_is_ours(pgid);
+                gone = match &exited {
+                    Some(flag) => flag.load(Ordering::SeqCst),
+                    None => !group_is_ours(pgid),
+                };
             }
             if status.is_some() || gone {
                 // The exit file may be written just as the group dies: look once more.
@@ -365,6 +380,7 @@ fn follow(dir: &Path, pgid: u32, tx: Sender<Event>) -> RunningJob {
         pgid,
         finished,
         cancelled,
+        trusted,
     }
 }
 
@@ -442,7 +458,7 @@ pub fn attach(root: &Path, tx: Sender<Event>) -> Option<Attached> {
 
     if status.is_none() && group_is_ours(record.pgid) {
         return Some(Attached::Running {
-            job: follow(&dir, record.pgid, tx),
+            job: follow(&dir, record.pgid, tx, None),
             record,
         });
     }
@@ -479,8 +495,17 @@ fn group_is_ours(pgid: u32) -> bool {
         return false;
     }
     if Path::new("/proc/self").exists() {
-        return fs::read(format!("/proc/{pgid}/cmdline"))
-            .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(MARKER));
+        // Just after `exec` the kernel can show an empty (or still the parent's) command line for
+        // a moment, so a reading without the marker is retried unless the process is already gone.
+        for _ in 0..CMDLINE_RETRIES {
+            match fs::read(format!("/proc/{pgid}/cmdline")) {
+                Ok(bytes) if String::from_utf8_lossy(&bytes).contains(MARKER) => return true,
+                Ok(_) if is_zombie(pgid) => return false,
+                Ok(_) => thread::sleep(Duration::from_millis(5)),
+                Err(_) => return false,
+            }
+        }
+        return false;
     }
     // No /proc (not Linux): the best we can do is ask whether the group exists.
     Command::new("kill")
@@ -490,6 +515,18 @@ fn group_is_ours(pgid: u32) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+/// Has the process exited without having been reaped yet? (`/proc/<pid>/stat` shows state `Z`.)
+fn is_zombie(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit(')')
+                .next()
+                .map(|rest| rest.trim_start().starts_with('Z'))
+        })
+        .unwrap_or(false)
 }
 
 /// Take the valid UTF-8 from the front of `pending`. A multi-byte character cut in half by a
@@ -529,9 +566,9 @@ fn drain_utf8(pending: &mut Vec<u8>) -> String {
 
 /// Send a signal to a whole process group. The standard library cannot do this, and the `kill`
 /// program can, without any `unsafe` code. Errors are ignored: the group may already be gone.
-fn signal_group(pgid: u32, signal: &str) {
+fn signal_group(pgid: u32, signal: &str, trusted: bool) {
     // Never signal a group that is not one of our runs (a recycled process id, for example).
-    if !group_is_ours(pgid) {
+    if !trusted && !group_is_ours(pgid) {
         return;
     }
     let _ = Command::new("kill")
@@ -557,9 +594,9 @@ impl RunningJob {
         if self.is_finished() || self.cancelled.swap(true, Ordering::SeqCst) {
             return; // nothing to stop, or already asked
         }
-        signal_group(self.pgid, "TERM");
+        signal_group(self.pgid, "TERM", self.trusted);
 
-        let (pgid, finished) = (self.pgid, Arc::clone(&self.finished));
+        let (pgid, finished, trusted) = (self.pgid, Arc::clone(&self.finished), self.trusted);
         thread::spawn(move || {
             let deadline = Instant::now() + grace;
             while Instant::now() < deadline {
@@ -569,7 +606,7 @@ impl RunningJob {
                 thread::sleep(POLL_INTERVAL);
             }
             if !finished.load(Ordering::SeqCst) {
-                signal_group(pgid, "KILL");
+                signal_group(pgid, "KILL", trusted);
             }
         });
     }
@@ -941,7 +978,7 @@ mod tests {
             !process_is_gone(grandchild),
             "runs must outlive the interface"
         );
-        signal_group(pgid, "KILL"); // clean up
+        signal_group(pgid, "KILL", true); // clean up
         assert!(wait_until_gone(grandchild));
     }
 
@@ -980,7 +1017,11 @@ mod tests {
     #[test]
     fn a_later_session_follows_a_run_that_is_still_going() {
         let dir = tempfile::tempdir().unwrap();
-        let dvc = fake_dvc(dir.path(), "echo first\nsleep 0.6\necho second");
+        // The run waits for a gate file, so it is certainly still going when the next session looks.
+        let dvc = fake_dvc(
+            dir.path(),
+            "echo first\nwhile [ ! -f go ]; do sleep 0.02; done\necho second",
+        );
         let (tx, rx) = mpsc::channel();
         let job = start_recorded(&dvc, dir.path(), recorded(&["repro", "train"]), tx).unwrap();
         // "Quit": the first session goes away without stopping the run.
@@ -988,11 +1029,13 @@ mod tests {
         drop(rx);
 
         let (tx2, rx2) = mpsc::channel();
-        let Some(Attached::Running { record, job: _job }) = attach(dir.path(), tx2) else {
-            panic!("the run should still be going");
+        let attached = attach(dir.path(), tx2);
+        let Some(Attached::Running { record, job: _job }) = attached else {
+            panic!("the run should still be going, got {attached:?}");
         };
         assert_eq!(record.stage, "train");
         assert_eq!(record.args, ["repro", "train"]);
+        fs::write(dir.path().join("go"), "").unwrap();
         let (text, outcome) = collect(&rx2);
         assert!(
             text.contains("first") && text.contains("second"),
@@ -1035,7 +1078,7 @@ mod tests {
         let job = start_recorded(&dvc, dir.path(), recorded(&["repro"]), tx).unwrap();
         let pgid = job.pgid;
         drop(job);
-        signal_group(pgid, "KILL");
+        signal_group(pgid, "KILL", true);
         assert!(wait_until_gone(pgid));
 
         let (tx2, _rx2) = mpsc::channel();
@@ -1075,7 +1118,7 @@ mod tests {
             matches!(attached, Some(Attached::Finished { .. })),
             "{attached:?}"
         );
-        signal_group(stranger.id(), "KILL"); // refused: not one of our runs
+        signal_group(stranger.id(), "KILL", false); // refused: not one of our runs
         thread::sleep(Duration::from_millis(100));
         assert!(
             stranger.try_wait().unwrap().is_none(),
@@ -1112,5 +1155,36 @@ mod tests {
         start(&dvc, dir.path(), &[], tx).unwrap();
         let (text, _) = collect(&rx);
         assert!(text.contains("two") && !text.contains("one"), "{text:?}");
+    }
+
+    #[test]
+    fn cancelling_right_after_starting_works_even_while_the_process_is_still_starting() {
+        // The kernel can take a while to finish `exec` on a busy machine; the run is still ours.
+        for _ in 0..25 {
+            let dir = tempfile::tempdir().unwrap();
+            let dvc = fake_dvc(dir.path(), "sleep 60");
+            let (tx, rx) = mpsc::channel();
+            let job = start(&dvc, dir.path(), &[], tx).unwrap();
+            job.cancel();
+            let (_, outcome) = collect(&rx);
+            assert_eq!(outcome, RunOutcome::Cancelled);
+        }
+    }
+
+    #[test]
+    fn a_run_we_started_is_never_mistaken_for_gone_while_it_is_slow_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let dvc = fake_dvc(dir.path(), "while [ ! -f go ]; do sleep 0.02; done");
+        let (tx, rx) = mpsc::channel();
+        let job = start(&dvc, dir.path(), &[], tx).unwrap();
+        // Longer than the interval between liveness checks: a wrong "gone" verdict would show here.
+        assert!(
+            rx.recv_timeout(Duration::from_millis(1100)).is_err(),
+            "no end-of-run event while it runs"
+        );
+        fs::write(dir.path().join("go"), "").unwrap();
+        let (_, outcome) = collect(&rx);
+        assert_eq!(outcome, RunOutcome::Succeeded);
+        drop(job);
     }
 }

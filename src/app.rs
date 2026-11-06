@@ -1634,7 +1634,8 @@ mod run_tests {
 
     #[test]
     fn a_new_session_follows_a_run_the_previous_one_left_running() {
-        let mut h = harness("echo started; sleep 0.8; echo finished");
+        // The run waits for a gate file, so it is certainly still going when the next session looks.
+        let mut h = harness("echo started\nwhile [ ! -f go ]; do sleep 0.02; done\necho finished");
         h.press(KeyCode::Char('r'));
         h.app.shutdown(); // "quit"; the run continues
         let old_tx = h.tx.clone();
@@ -1653,6 +1654,8 @@ mod run_tests {
                 .unwrap()
                 .contains("following a run started earlier")
         );
+        thread::sleep(Duration::from_millis(300));
+        fs::write(h.dir.path().join("go"), "").unwrap();
 
         let deadline = Instant::now() + WAIT;
         while next.is_running() {
@@ -1672,7 +1675,10 @@ mod run_tests {
             next.last_runs.contains_key("a"),
             "recorded like any other run"
         );
-        assert!(next.run.as_ref().unwrap().duration() >= Duration::from_millis(600));
+        assert!(
+            next.run.as_ref().unwrap().duration() >= Duration::from_millis(250),
+            "the time counts from the real start"
+        );
     }
 
     #[test]
