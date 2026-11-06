@@ -13,6 +13,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::{
     dag::{self, Layout, Move},
     experiments::{self, RowKind, Sort, Table},
+    external,
     files::{self, FileEntry, Preview},
     form::{ExperimentForm, FormAction},
     graph::Graph,
@@ -56,6 +57,29 @@ pub struct Confirm {
     /// Names the run in the UI once confirmed.
     pub label: String,
     pub args: Vec<String>,
+    /// When not empty, confirming stops these `dvc` processes (started outside dvcat) instead of
+    /// running `args`.
+    pub kill: Vec<u32>,
+}
+
+/// The question asked when a run could not start because other `dvc` processes hold the lock.
+fn blocked_confirm(blocking: &[external::ExternalRun]) -> Confirm {
+    let mut lines = vec![
+        "Another dvc process, not started by dvcat, holds the lock this run needs:".to_owned(),
+    ];
+    lines.extend(
+        blocking
+            .iter()
+            .map(|run| format!("  PID {}: {}", run.pid, run.short_command())),
+    );
+    lines.push("Stop it? Its unfinished work is lost; DVC cleans up its lock.".to_owned());
+    Confirm {
+        title: "Blocked by a running dvc".to_owned(),
+        lines,
+        label: "stop external dvc".to_owned(),
+        args: Vec::new(),
+        kill: blocking.iter().map(|run| run.pid).collect(),
+    }
 }
 
 /// Which pane of the pipeline view receives the movement keys.
@@ -123,6 +147,8 @@ pub enum Effect {
     LoadPreview(String),
     /// Hand a project file to `$EDITOR`. The terminal belongs to `main`, so we only leave a request.
     OpenEditor(String),
+    /// Stop `dvc` processes that were started outside dvcat (by process id).
+    StopExternal(Vec<u32>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -735,6 +761,7 @@ impl App {
                 ],
                 label: format!("apply {name}"),
                 args: runner::exp_apply_args(&name),
+                kill: Vec::new(),
             },
             Action::Remove => Confirm {
                 title: format!("Remove {name}?"),
@@ -744,6 +771,7 @@ impl App {
                 ],
                 label: format!("remove {name}"),
                 args: runner::exp_remove_args(&name),
+                kill: Vec::new(),
             },
         });
     }
@@ -808,6 +836,10 @@ impl App {
     fn on_confirm_key(&mut self, code: KeyCode) -> Vec<Effect> {
         match code {
             KeyCode::Char('y') | KeyCode::Enter => match self.confirm.take() {
+                Some(Confirm { kill, .. }) if !kill.is_empty() => {
+                    self.notice = Some("stopping the other dvc process…".to_owned());
+                    vec![Effect::StopExternal(kill)]
+                }
                 Some(Confirm { label, args, .. }) => self.begin_dvc_run(label, args),
                 None => Vec::new(),
             },
@@ -947,10 +979,15 @@ impl App {
             self.experiment_times.insert(name, duration.as_secs_f64());
         }
         self.save_history();
-        let Some(run) = &mut self.run else {
-            return Vec::new();
-        };
-        run.phase = RunPhase::Finished(outcome);
+        let blocked = matches!(outcome, RunOutcome::Failed { .. })
+            .then(|| self.blocking_runs())
+            .unwrap_or_default();
+        if let Some(run) = &mut self.run {
+            run.phase = RunPhase::Finished(outcome);
+        }
+        if !blocked.is_empty() {
+            self.confirm = Some(blocked_confirm(&blocked));
+        }
         let mut effects = Vec::new();
         // A new branch changes nothing in the workspace, so nothing needs re-checking.
         let refresh = refresh && !matches!(kind, RunKind::Branch { .. });
@@ -971,6 +1008,18 @@ impl App {
             }
         }
         effects
+    }
+
+    /// If the finished run failed because other `dvc` processes hold the lock, those processes.
+    fn blocking_runs(&self) -> Vec<external::ExternalRun> {
+        let Some(run) = &self.run else {
+            return Vec::new();
+        };
+        let log: String = run.log.lines().collect::<Vec<_>>().join("\n");
+        if !external::log_mentions_lock(&log) {
+            return Vec::new();
+        }
+        external::iter_external_runs(&self.project.root).collect()
     }
 
     fn scroll_log_back(&mut self) {
@@ -1012,6 +1061,10 @@ impl App {
                 if let Some(job) = self.run.as_ref().and_then(|run| run.job.as_ref()) {
                     job.cancel();
                 }
+            }
+            Effect::StopExternal(pids) => {
+                // Waiting for the processes to exit can take seconds, so the interface must not.
+                thread::spawn(move || external::stop(&pids, external::KILL_GRACE));
             }
             Effect::FetchExperiments => self.fetch_experiments(tx),
             Effect::LoadPreview(path) => {
@@ -1403,6 +1456,56 @@ mod run_tests {
         );
         assert_eq!(h.lines(), ["went wrong"]);
         h.pump_until(|app| app.statuses.is_some()); // a failed run may still have changed dvc.lock
+    }
+
+    #[test]
+    fn a_run_blocked_by_an_outside_dvc_offers_to_stop_it() {
+        let mut h = harness("echo \"ERROR: x is busy, it is being blocked by:\"; exit 255");
+        // A live process that looks like `dvc`, recorded in DVC's lock file.
+        let other = h.dir.path().join("dvc");
+        fs::write(&other, "#!/bin/sh\nsleep 60 &\nwait\n").unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = std::process::Command::new(&other)
+            .arg("repro")
+            .spawn()
+            .unwrap();
+        fs::create_dir_all(h.dir.path().join(".dvc/tmp")).unwrap();
+        let lock = format!(
+            r#"{{"read": {{}}, "write": {{"out": {{"pid": {}, "cmd": "dvc repro pdf2md"}}}}}}"#,
+            child.id()
+        );
+        fs::write(h.dir.path().join(".dvc/tmp/rwlock"), lock).unwrap();
+
+        h.press(KeyCode::Char('r'));
+        h.pump_until_finished();
+        let confirm = h.app.confirm.clone().expect("a question is asked");
+        assert_eq!(confirm.kill, [child.id()]);
+        assert!(confirm.lines.join("\n").contains("dvc repro pdf2md"));
+
+        // Declining leaves the other process alone.
+        h.press(KeyCode::Char('n'));
+        assert!(h.app.confirm.is_none());
+        assert!(child.try_wait().unwrap().is_none());
+
+        // Asking again and agreeing stops it.
+        h.app.confirm = Some(blocked_confirm(&[external::ExternalRun {
+            pid: child.id(),
+            command: "dvc repro".into(),
+        }]));
+        h.press(KeyCode::Char('y'));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the other dvc is still running");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn an_ordinary_failure_asks_nothing() {
+        let mut h = harness("echo went wrong; exit 2");
+        h.press(KeyCode::Char('r'));
+        h.pump_until_finished();
+        assert!(h.app.confirm.is_none());
     }
 
     #[test]

@@ -1332,6 +1332,7 @@ mod tests {
             lines: vec!["Deletes the experiment.".into()],
             label: "remove lr-005".into(),
             args: vec![],
+            kill: vec![],
         });
         let rows = render(&app, 100, 24);
         let text = rows.join("\n");

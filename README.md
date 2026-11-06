@@ -103,6 +103,10 @@ is still going. Start `dvcat` in the same project again and the run is shown wit
 (its time counts from the real start; `x` still cancels it). A run that finished while the interface was closed is shown once,
 with its log, outcome and duration. To stop a run, press `x` first. The state lives in `.dvc/tmp/dvcat-run.*` (`.dvcat/` if there is no `.dvc`).
 
+If a run fails because a `dvc` process that dvcat did not start (another terminal, another tool) holds DVC's lock,
+dvcat reads `.dvc/tmp/rwlock`, names the live process, and asks whether to stop it (`y`/`n`). Stopping sends SIGTERM to that
+process and what it started, and SIGKILL after 5 seconds. Its output cannot be followed, because dvcat has no access to it.
+
 ## Run times
 
 The log title shows how long a run has taken (live while it runs, fixed afterwards), and a stage's detail pane has a

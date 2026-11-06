@@ -5,6 +5,7 @@ pub mod cli;
 pub mod dag;
 pub mod expand;
 pub mod experiments;
+pub mod external;
 pub mod files;
 pub mod form;
 pub mod graph;
