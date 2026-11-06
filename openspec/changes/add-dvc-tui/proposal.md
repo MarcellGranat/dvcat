@@ -6,7 +6,7 @@ DVC is CLI-only: understanding a pipeline means juggling `dvc dag`, `dvc status`
 
 ## What Changes
 
-- New Rust binary `dvc_tui` (ratatui + crossterm) that takes a DVC project path (default: current directory).
+- New Rust binary `dvcat` (ratatui + crossterm) that takes a DVC project path (default: current directory).
 - Pipeline view: stages from `dvc.yaml` in topological order, dependency edges derived from stage `outs` → `deps`, and a detail pane (cmd, deps, params, outs).
 - Stale detection: compare `dvc.lock` against the workspace (params first, then dep hashes) and show why a stage is stale, e.g. `params.download.limit 3 → null`.
 - Stage runs: launch `dvc repro <stage>` from the UI, stream its output live, allow cancelling.

@@ -1,10 +1,10 @@
 [package]
-name = "dvc_tui"
+name = "dvcat"
 version = "0.1.0"
 edition = "2024"
 description = "A minimal, modern terminal UI for DVC: browse the pipeline, see what is stale and why, run stages and experiments"
 license = "MIT"
-repository = "https://github.com/MarcellGranat/dvc-tui"
+repository = "https://github.com/MarcellGranat/dvcat"
 readme = "README.md"
 keywords = ["dvc", "tui", "mlops"]
 categories = ["command-line-utilities"]

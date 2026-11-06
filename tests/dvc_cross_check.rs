@@ -13,7 +13,7 @@ use std::{
     process::Command,
 };
 
-use dvc_tui::{
+use dvcat::{
     graph,
     project::Project,
     stale::{self, Reason},

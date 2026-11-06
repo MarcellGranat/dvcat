@@ -204,7 +204,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     );
     let mut left = vec![
         Span::styled(
-            " ◆ dvc-tui ",
+            " ◆ dvcat ",
             Style::new()
                 .fg(theme::CRUST)
                 .bg(theme::MAUVE)
@@ -1070,7 +1070,7 @@ mod tests {
     fn header_names_the_app_and_marks_the_active_view() {
         let mut app = demo_app();
         let rows = render(&app, 100, 20);
-        assert!(rows[0].contains("◆ dvc-tui"), "{rows:#?}");
+        assert!(rows[0].contains("◆ dvcat"), "{rows:#?}");
         assert!(rows[0].contains("demo"), "{rows:#?}");
         assert!(rows[0].contains("Pipeline") && rows[0].contains("Experiments"));
         // The active tab is drawn on a filled background.
@@ -1421,10 +1421,7 @@ mod tests {
         let app = graph_app(demo_app());
         let rows = render(&app, 100, 20);
         let text = rows.join("\n");
-        assert!(
-            text.contains("◆ dvc-tui") && text.contains("Graph"),
-            "{text}"
-        );
+        assert!(text.contains("◆ dvcat") && text.contains("Graph"), "{text}");
         for name in ["prepare", "features", "train"] {
             assert!(
                 text.contains(&format!("✓ {name}")),

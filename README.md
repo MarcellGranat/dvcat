@@ -1,4 +1,6 @@
-# dvc_tui
+# dvcat 🐱
+
+*DVC + cat: a catppuccin-coloured terminal UI that keeps an eye on your pipeline.*
 
 A minimal terminal UI for [DVC](https://dvc.org): browse a pipeline, see which stages are stale and why,
 run a stage with a live log, and compare experiments. Written in Rust with [ratatui](https://ratatui.rs).
@@ -7,6 +9,15 @@ run a stage with a live log, and compare experiments. Written in Rust with [rata
 > Pipeline list, detail and files panes with preview and editor, stale detection (params, deps, cmd, outputs) with reasons,
 > `foreach`/`matrix` stages, a stage graph, runs with a live log and cancel, and an experiments table with deltas,
 > a chart, new/apply/remove/branch actions. The look is [Catppuccin Mocha](https://catppuccin.com) and needs a true-colour terminal.
+
+## Install
+
+```sh
+cargo install --git https://github.com/MarcellGranat/dvcat --locked
+# or from a clone: cargo install --path . --locked
+```
+
+Then, in any DVC project: `dvcat` (or `dvcat path/to/project`).
 
 ## Quick start
 
@@ -17,7 +28,7 @@ just demo-reset   # rebuild the Git demo from scratch
 just check        # fmt + clippy + tests
 ```
 
-`just` uses the `dvc` named by `$DVC_TUI_DVC`, or else the one on your `PATH`.
+`just` uses the `dvc` named by `$DVCAT_DVC`, or else the one on your `PATH`.
 
 ## Run
 
@@ -25,7 +36,7 @@ just check        # fmt + clippy + tests
 cargo run -- [PROJECT_DIR]      # PROJECT_DIR defaults to the current directory
 ```
 
-`dvc` is looked up in `$DVC_TUI_DVC`, then `<PROJECT_DIR>/.venv/bin/dvc`, then `PATH`.
+`dvc` is looked up in `$DVCAT_DVC`, then `<PROJECT_DIR>/.venv/bin/dvc`, then `PATH`.
 If none is found, pressing `r` explains where it looked.
 
 ## Keys
@@ -38,7 +49,7 @@ If none is found, pressing `r` explains where it looked.
 | `o`        | *(files pane or preview)* open the file in `$VISUAL` / `$EDITOR` (`vi` if unset) |
 | `Esc`      | close the preview; from the files pane back to the stages |
 | `g` / `G`  | *(preview)* top / bottom                 |
-| `q`        | quit; a running stage **keeps running** and is picked up again when you start `dvc_tui` in the project |
+| `q`        | quit; a running stage **keeps running** and is picked up again when you start `dvcat` in the project |
 | `r`        | run the selected stage only (`dvc repro --single-item`) |
 | `R`        | run it with stale upstream stages (`dvc repro`) |
 | `x`        | cancel the running stage (from either view) |
@@ -88,9 +99,9 @@ The cursor is shared with the pipeline view (the same stage stays selected), and
 ## Runs outlive the interface
 
 `dvc` runs started from the interface are detached: quitting with `q` does not stop them, and a message tells you which command
-is still going. Start `dvc_tui` in the same project again and the run is shown with its output so far and keeps streaming
+is still going. Start `dvcat` in the same project again and the run is shown with its output so far and keeps streaming
 (its time counts from the real start; `x` still cancels it). A run that finished while the interface was closed is shown once,
-with its log, outcome and duration. To stop a run, press `x` first. The state lives in `.dvc/tmp/dvc-tui-run.*` (`.dvc-tui/` if there is no `.dvc`).
+with its log, outcome and duration. To stop a run, press `x` first. The state lives in `.dvc/tmp/dvcat-run.*` (`.dvcat/` if there is no `.dvc`).
 
 ## Run times
 
@@ -98,7 +109,7 @@ The log title shows how long a run has taken (live while it runs, fixed afterwar
 `last run` line with the outcome and duration of its latest run from this session. DVC itself keeps no durations, so
 runs made outside the interface, or before it was opened, have none. The times are also in the stage list (right-aligned)
 and, for experiments run from the form, in a `run time` column next to the name. They are remembered between sessions in
-`.dvc/tmp/dvc-tui-history.json` (inside DVC's own, Git-ignored tmp directory).
+`.dvc/tmp/dvcat-history.json` (inside DVC's own, Git-ignored tmp directory).
 A run in which DVC only reports `Stage '<name>' didn't change, skipping` is not recorded, since nothing ran.
 
 ## Templated stages
@@ -129,8 +140,8 @@ The demo is not a Git repository, so the experiments view shows DVC's "Only supp
 To try experiments, build a Git copy with three finished experiments (`lr-001`, `lr-005`, `lr-010`):
 
 ```sh
-DVC=/path/to/dvc tests/fixtures/demo/make-git-demo.sh /tmp/dvc-tui-git-demo
-cargo run -- /tmp/dvc-tui-git-demo
+DVC=/path/to/dvc tests/fixtures/demo/make-git-demo.sh /tmp/dvcat-git-demo
+cargo run -- /tmp/dvcat-git-demo
 ```
 
 ## Develop

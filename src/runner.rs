@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::Event;
 
 /// Highest-priority place to look for `dvc`.
-pub const DVC_ENV_VAR: &str = "DVC_TUI_DVC";
+pub const DVC_ENV_VAR: &str = "DVCAT_DVC";
 /// How long a cancelled run may take to react to SIGTERM before it is killed.
 pub const KILL_GRACE: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -57,7 +57,7 @@ impl fmt::Display for DvcNotFound {
 
 impl std::error::Error for DvcNotFound {}
 
-/// Order: `$DVC_TUI_DVC`, `<project>/.venv/bin/dvc`, then every directory on `PATH`.
+/// Order: `$DVCAT_DVC`, `<project>/.venv/bin/dvc`, then every directory on `PATH`.
 /// The environment is passed in (not read here) so the order can be tested.
 pub fn find_dvc(
     project_root: &Path,
@@ -218,34 +218,34 @@ pub struct RunningJob {
 // Where a run keeps its state
 // ---------------------------------------------------------------------------------------------
 
-const RECORD_FILE: &str = "dvc-tui-run.json";
-const LOG_FILE: &str = "dvc-tui-run.log";
-const EXIT_FILE: &str = "dvc-tui-run.exit";
+const RECORD_FILE: &str = "dvcat-run.json";
+const LOG_FILE: &str = "dvcat-run.log";
+const EXIT_FILE: &str = "dvcat-run.exit";
 /// Appears in the wrapper's command line, which is how a live run is recognised (and a recycled
 /// process id is not mistaken for it).
-const MARKER: &str = "dvc_tui_run";
+const MARKER: &str = "dvcat_run";
 /// Runs `"$@"` with its output appended to a file and writes the exit status to another, so both
 /// outlive the interface. `trap :` keeps the wrapper alive when the group gets SIGTERM, so it can
 /// still record the status (a handler, unlike "ignore", is reset by `exec` in the children).
 /// Exit status 126 is retried: a freshly written script can briefly look "busy" to `exec`.
-const WRAPPER: &str = r#": dvc_tui_run
+const WRAPPER: &str = r#": dvcat_run
 trap : TERM INT
 tries=0
 while :; do
-  "$@" >>"$DVC_TUI_LOG" 2>&1 </dev/null
+  "$@" >>"$DVCAT_LOG" 2>&1 </dev/null
   code=$?
   if [ "$code" = 126 ] && [ "$tries" -lt 5 ]; then tries=$((tries+1)); sleep 0.02; continue; fi
   break
 done
-echo "$code" >"$DVC_TUI_EXIT""#;
+echo "$code" >"$DVCAT_EXIT""#;
 
-/// `<root>/.dvc/tmp` (DVC keeps it out of Git), or `<root>/.dvc-tui` when there is no `.dvc`.
+/// `<root>/.dvc/tmp` (DVC keeps it out of Git), or `<root>/.dvcat` when there is no `.dvc`.
 fn state_dir(root: &Path) -> PathBuf {
     let dvc = root.join(".dvc");
     if dvc.is_dir() {
         dvc.join("tmp")
     } else {
-        root.join(".dvc-tui")
+        root.join(".dvcat")
     }
 }
 
@@ -295,8 +295,8 @@ pub fn start_recorded(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .env("DVC_TUI_LOG", dir.join(LOG_FILE))
-        .env("DVC_TUI_EXIT", dir.join(EXIT_FILE))
+        .env("DVCAT_LOG", dir.join(LOG_FILE))
+        .env("DVCAT_EXIT", dir.join(EXIT_FILE))
         // A Python stdout that is not a terminal is block-buffered; without this, output appears
         // only at exit.
         .env("PYTHONUNBUFFERED", "1")
@@ -698,7 +698,7 @@ mod tests {
         let error = find_dvc(dir.path(), Some(missing.as_os_str()), Some(&path_var)).unwrap_err();
         assert_eq!(error.searched.len(), 3, "{error}");
         let message = error.to_string();
-        assert!(message.contains("DVC_TUI_DVC"), "{message}");
+        assert!(message.contains("DVCAT_DVC"), "{message}");
         assert!(message.contains(".venv/bin/dvc"), "{message}");
         assert!(message.contains("PATH (2 directories)"), "{message}");
     }

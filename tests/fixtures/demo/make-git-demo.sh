@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build a Git + DVC copy of the demo with three finished experiments, to try the experiments view.
-# Usage: DVC=/path/to/dvc ./make-git-demo.sh [DEST]     (DEST defaults to /tmp/dvc-tui-git-demo)
+# Usage: DVC=/path/to/dvc ./make-git-demo.sh [DEST]     (DEST defaults to /tmp/dvcat-git-demo)
 # The demo itself stays Git-free (a nested .git cannot be committed); this script makes a copy.
 set -euo pipefail
 SRC="$(cd "$(dirname "$0")" && pwd)"
-DEST="${1:-/tmp/dvc-tui-git-demo}"
+DEST="${1:-/tmp/dvcat-git-demo}"
 DVC="${DVC:-dvc}"
 export DVC_NO_ANALYTICS=1
 # Identity for the commit only; nothing is written to anyone's git config.

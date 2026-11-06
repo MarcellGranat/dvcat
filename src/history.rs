@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::runner::RunOutcome;
 
-const FILE: &str = ".dvc/tmp/dvc-tui-history.json";
+const FILE: &str = ".dvc/tmp/dvcat-history.json";
 
 /// `850ms`, `4.2s`, `2m 05s`, `1h 02m`.
 pub fn format_duration(duration: Duration) -> String {

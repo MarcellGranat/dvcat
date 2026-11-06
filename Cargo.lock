@@ -355,7 +355,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dvc_tui"
+name = "dvcat"
 version = "0.1.0"
 dependencies = [
  "anyhow",

@@ -4,7 +4,7 @@ Implementation note: the author is learning Rust. While applying these tasks, ex
 
 ## 1. Project skeleton and test fixture
 
-- [x] 1.1 Create the cargo binary `dvc_tui` with the dependencies from design decision 9; verify `cargo build` succeeds and `cargo run` prints a placeholder
+- [x] 1.1 Create the cargo binary `dvcat` with the dependencies from design decision 9; verify `cargo build` succeeds and `cargo run` prints a placeholder
 - [x] 1.2 Create `tests/fixtures/demo/`, a throwaway three-stage DVC repo (`prepare` → `features` → `train`) with `params.yaml` and a metrics file, plus a script that regenerates its `dvc.lock`; verify `dvc status` and `dvc repro` run cleanly inside it
 - [x] 1.3 Add a minimal `README.md` with run instructions and key bindings; verify the documented commands work as written
 

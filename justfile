@@ -1,8 +1,8 @@
 # Common tasks. Run `just` to list them.
 
-# Which dvc to use: $DVC_TUI_DVC, otherwise `dvc` from PATH.
-dvc := env("DVC_TUI_DVC", "dvc")
-demo_dir := env("DVC_TUI_DEMO_DIR", "/tmp/dvc-tui-git-demo")
+# Which dvc to use: $DVCAT_DVC, otherwise `dvc` from PATH.
+dvc := env("DVCAT_DVC", "dvc")
+demo_dir := env("DVCAT_DEMO_DIR", "/tmp/dvcat-git-demo")
 
 default:
     @just --list
@@ -11,9 +11,9 @@ default:
 demo:
     #!/usr/bin/env bash
     set -euo pipefail
-    [ -x "{{dvc}}" ] || command -v "{{dvc}}" >/dev/null || { echo "dvc not found: {{dvc}} (set DVC_TUI_DVC)"; exit 1; }
+    [ -x "{{dvc}}" ] || command -v "{{dvc}}" >/dev/null || { echo "dvc not found: {{dvc}} (set DVCAT_DVC)"; exit 1; }
     [ -d "{{demo_dir}}/.git" ] || DVC="{{dvc}}" tests/fixtures/demo/make-git-demo.sh "{{demo_dir}}"
-    DVC_TUI_DVC="{{dvc}}" cargo run --quiet -- "{{demo_dir}}"
+    DVCAT_DVC="{{dvc}}" cargo run --quiet -- "{{demo_dir}}"
 
 # Throw the Git demo away and build it again (also resets edits made while playing).
 demo-reset:
@@ -23,9 +23,9 @@ demo-reset:
 demo-plain:
     #!/usr/bin/env bash
     set -euo pipefail
-    rm -rf /tmp/dvc-tui-plain-demo
-    cp -r tests/fixtures/demo /tmp/dvc-tui-plain-demo
-    DVC_TUI_DVC="{{dvc}}" cargo run --quiet -- /tmp/dvc-tui-plain-demo
+    rm -rf /tmp/dvcat-plain-demo
+    cp -r tests/fixtures/demo /tmp/dvcat-plain-demo
+    DVCAT_DVC="{{dvc}}" cargo run --quiet -- /tmp/dvcat-plain-demo
 
 # Format, lint and test (the DVC-backed tests run when dvc is found).
 check:

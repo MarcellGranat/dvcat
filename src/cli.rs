@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
-pub const USAGE: &str = "usage: dvc_tui [PROJECT_DIR]";
+pub const USAGE: &str = "usage: dvcat [PROJECT_DIR]";
 
 /// Parse arguments (the first item is the program name, as in `std::env::args()`).
 /// Returns the project directory, defaulting to the current directory.
@@ -31,22 +31,22 @@ mod tests {
 
     #[test]
     fn defaults_to_current_directory() {
-        assert_eq!(parse(&["dvc_tui"]).unwrap(), PathBuf::from("."));
+        assert_eq!(parse(&["dvcat"]).unwrap(), PathBuf::from("."));
     }
 
     #[test]
     fn takes_a_project_directory() {
         assert_eq!(
-            parse(&["dvc_tui", "/some/dir"]).unwrap(),
+            parse(&["dvcat", "/some/dir"]).unwrap(),
             PathBuf::from("/some/dir")
         );
     }
 
     #[test]
     fn rejects_options_and_extra_arguments_with_usage() {
-        let err = parse(&["dvc_tui", "--help"]).unwrap_err().to_string();
+        let err = parse(&["dvcat", "--help"]).unwrap_err().to_string();
         assert!(err.contains("--help") && err.contains("usage:"), "{err}");
-        let err = parse(&["dvc_tui", "a", "b"]).unwrap_err().to_string();
+        let err = parse(&["dvcat", "a", "b"]).unwrap_err().to_string();
         assert!(err.contains("'b'") && err.contains("usage:"), "{err}");
     }
 }

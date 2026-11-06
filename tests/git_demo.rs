@@ -9,7 +9,7 @@ use std::{
     process::Command,
 };
 
-use dvc_tui::experiments::{self, Column, RowKind};
+use dvcat::experiments::{self, Column, RowKind};
 
 fn find_dvc() -> Option<PathBuf> {
     if let Some(path) = env::var_os("DVC_BIN") {

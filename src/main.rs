@@ -21,7 +21,7 @@ use ratatui::{
     },
 };
 
-use dvc_tui::{
+use dvcat::{
     app::{App, Event},
     cli, graph,
     project::Project,
@@ -44,7 +44,7 @@ impl Drop for TerminalGuard {
 fn main() -> Result<()> {
     // Load first: if this fails, the error prints on the normal screen, not the alternate one.
     let dir = cli::project_dir_from_args(std::env::args())?;
-    // An absolute path gives the header a real project name even for `dvc_tui .`.
+    // An absolute path gives the header a real project name even for `dvcat .`.
     let dir = dir
         .canonicalize()
         .with_context(|| format!("cannot open project directory {}", dir.display()))?;
@@ -60,7 +60,7 @@ fn main() -> Result<()> {
     // Restore the terminal first, so the message lands on the normal screen and stays visible.
     drop(_guard);
     if let Ok(Some(message)) = &result {
-        eprintln!("dvc_tui: {message}");
+        eprintln!("dvcat: {message}");
     }
     result.map(|_| ())
 }

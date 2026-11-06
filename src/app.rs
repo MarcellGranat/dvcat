@@ -1098,7 +1098,7 @@ impl App {
             return None;
         }
         Some(format!(
-            "{} is still running in the background; start dvc_tui in this project again to follow it.",
+            "{} is still running in the background; start dvcat in this project again to follow it.",
             run.command_line()
         ))
     }
@@ -1130,7 +1130,7 @@ impl App {
                 run.log.push_str(&log);
                 run.fixed_duration = duration;
                 self.notice = Some(format!(
-                    "a run finished while dvc_tui was closed: {}",
+                    "a run finished while dvcat was closed: {}",
                     run.command_line()
                 ));
                 self.run = Some(run);
@@ -1685,7 +1685,7 @@ mod run_tests {
     fn a_run_that_finished_while_closed_is_shown_once_and_recorded() {
         let mut h = harness("echo done quietly");
         h.press(KeyCode::Char('r'));
-        let exit_file = h.dir.path().join(".dvc-tui").join("dvc-tui-run.exit");
+        let exit_file = h.dir.path().join(".dvcat").join("dvcat-run.exit");
         let deadline = Instant::now() + WAIT;
         while !exit_file.exists() {
             assert!(Instant::now() < deadline, "the run never finished");
@@ -1703,7 +1703,7 @@ mod run_tests {
             next.notice
                 .as_deref()
                 .unwrap()
-                .contains("finished while dvc_tui was closed")
+                .contains("finished while dvcat was closed")
         );
         assert_eq!(next.last_runs["a"].outcome, RunOutcome::Succeeded);
 
