@@ -193,7 +193,7 @@ fn render_plot(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: R
 }
 
 /// At most four decimals, without trailing zeros.
-fn short_number(value: f64) -> String {
+pub(super) fn short_number(value: f64) -> String {
     let text = format!("{value:.4}");
     text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }

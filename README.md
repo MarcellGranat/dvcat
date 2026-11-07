@@ -55,7 +55,7 @@ If none is found, pressing `r` explains where it looked.
 | `x`        | cancel the running stage (from either view) |
 | `X`        | stop a `dvc` process started outside dvcat (asks first) |
 | `PgUp` / `PgDn` | scroll the log                      |
-| `1` `2` `3` | pipeline / graph / experiments view (also `g` for the graph, `e` for the experiments) |
+| `1` `2` `3` `4` | pipeline / graph / experiments / plots view (also `g` for the graph, `e` for the experiments, `p` for the plots) |
 | `e`        | switch between the pipeline and the experiments table |
 | `g`        | show the stage graph (`g` or `Esc` to leave); `h`/`l` follow the edges, `j`/`k` move within a layer, `Enter` opens the stage, `r`/`R` run it |
 | `h` / `l`  | *(experiments)* move the column cursor   |
@@ -170,3 +170,13 @@ It needs DVC: `DVC_BIN=/path/to/dvc cargo test --test dvc_cross_check`;
 ## License
 
 MIT, see `LICENSE`.
+
+## Plots
+
+The plots view (`4` or `p`) draws the `plots:` section of `dvc.yaml` in the terminal, reading the data files from the
+workspace (CSV, TSV, JSON, YAML). Nothing is saved by dvcat: the definitions live in `dvc.yaml` and the data in your
+tracked files, as in DVC. `j`/`k` pick a plot, `F5` re-reads the files.
+
+Supported: `x`, `y` (a field, a list, or `file: fields`), `title`, `x_label`, `y_label` and the templates `linear`,
+`simple`, `scatter`, `smooth` (drawn as a plain line), `bar_horizontal`, `bar_horizontal_sorted`, `confusion` and
+`confusion_normalized`. Images cannot be shown, and revisions are not compared yet (`dvc plots diff`).

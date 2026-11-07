@@ -13,6 +13,7 @@ pub mod history;
 pub mod log;
 pub mod params_filter;
 pub mod plot;
+pub mod plots;
 pub mod project;
 pub mod prompt;
 pub mod runner;

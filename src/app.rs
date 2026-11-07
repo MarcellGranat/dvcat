@@ -20,6 +20,7 @@ use crate::{
     history::{self, History, StoredOutcome, StoredRun},
     log::LogBuffer,
     params_filter::{ParamPicker, PickerAction},
+    plots::{self, Plot},
     project::{Project, Stage},
     prompt::{Prompt, PromptAction},
     runner::{self, Attached, DvcNotFound, KILL_GRACE, RunOutcome, RunRecord, RunningJob},
@@ -106,6 +107,16 @@ pub enum View {
     Experiments,
     /// The stage graph, drawn as boxes and lines.
     Dag,
+    /// The plots defined in `dvc.yaml`, drawn from their data files.
+    Plots,
+}
+
+/// Everything the plots view needs to remember.
+#[derive(Debug, Default)]
+pub struct PlotsView {
+    /// `None` until the view is first opened; read again by F5.
+    pub data: Option<Result<Vec<Plot>, String>>,
+    pub selected: usize,
 }
 
 /// Everything the experiments view needs to remember.
@@ -323,6 +334,7 @@ pub struct App {
     pub run: Option<Run>,
     pub view: View,
     pub experiments: ExperimentsView,
+    pub plots: PlotsView,
     pub focus: Focus,
     /// Where the graph view draws each stage; computed once, because the stages do not change.
     pub dag: Layout,
@@ -367,6 +379,7 @@ impl App {
             run: None,
             view: View::Pipeline,
             experiments: ExperimentsView::default(),
+            plots: PlotsView::default(),
             focus: Focus::Stages,
             form: None,
             confirm: None,
@@ -563,6 +576,8 @@ impl App {
                 Vec::new()
             }
             KeyCode::Char('3') if self.view != View::Experiments => self.toggle_view(),
+            KeyCode::Char('4') => self.open_plots(),
+            KeyCode::Char('p') if self.view != View::Experiments => self.open_plots(),
             KeyCode::Char('g') => {
                 self.view = if self.view == View::Dag {
                     View::Pipeline
@@ -581,6 +596,7 @@ impl App {
                 View::Pipeline => self.on_pipeline_key(code),
                 View::Experiments => self.on_experiments_key(code),
                 View::Dag => self.on_dag_key(code),
+                View::Plots => self.on_plots_key(code),
             },
         }
     }
@@ -684,13 +700,48 @@ impl App {
         Vec::new()
     }
 
+    fn open_plots(&mut self) -> Vec<Effect> {
+        self.view = View::Plots;
+        if self.plots.data.is_none() {
+            self.load_plots();
+        }
+        Vec::new()
+    }
+
+    /// Read `dvc.yaml` and the plot data files again. They are small, so this happens on the spot.
+    fn load_plots(&mut self) {
+        let data = plots::load(&self.project.root);
+        let count = data.as_ref().map_or(0, Vec::len);
+        self.plots.selected = self.plots.selected.min(count.saturating_sub(1));
+        self.plots.data = Some(data);
+    }
+
+    fn on_plots_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        let count = match &self.plots.data {
+            Some(Ok(list)) => list.len(),
+            _ => 0,
+        };
+        match code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.plots.selected = (self.plots.selected + 1).min(count.saturating_sub(1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.plots.selected = self.plots.selected.saturating_sub(1);
+            }
+            KeyCode::F(5) => self.load_plots(),
+            KeyCode::Esc => self.view = View::Pipeline,
+            _ => {}
+        }
+        Vec::new()
+    }
+
     fn toggle_view(&mut self) -> Vec<Effect> {
         match self.view {
             View::Experiments => {
                 self.view = View::Pipeline;
                 Vec::new()
             }
-            View::Pipeline | View::Dag => {
+            View::Pipeline | View::Dag | View::Plots => {
                 self.view = View::Experiments;
                 // Fetch on first visit only; F5 refreshes after that.
                 if self.experiments.data.is_none() {
@@ -3346,5 +3397,41 @@ mod dag_view_tests {
         press(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('q'));
         assert!(app.should_quit);
+    }
+
+    const WITH_PLOTS: &[(&str, &str)] = &[
+        (
+            "dvc.yaml",
+            "stages:\n  a:\n    cmd: echo\nplots:\n  - acc.csv:\n      x: epoch\n  - gone.csv\n",
+        ),
+        ("acc.csv", "epoch,acc\n1,0.5\n2,0.7\n3,0.9\n"),
+    ];
+
+    #[test]
+    fn plots_view_loads_on_first_visit_and_moves_between_plots() {
+        let (_dir, mut app) = app_with_files(WITH_PLOTS);
+        assert!(app.plots.data.is_none());
+        press(&mut app, KeyCode::Char('p'));
+        assert_eq!(app.view, View::Plots);
+        assert_eq!(app.plots.data.as_ref().unwrap().as_ref().unwrap().len(), 2);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.plots.selected, 1);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.plots.selected, 0);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.view, View::Pipeline);
+        press(&mut app, KeyCode::Char('4'));
+        assert_eq!(app.view, View::Plots);
+    }
+
+    #[test]
+    fn p_still_toggles_the_chart_in_the_experiments_view() {
+        let (_dir, mut app) = app_with_files(WITH_PLOTS);
+        app.view = View::Experiments;
+        let before = app.experiments.plot;
+        press(&mut app, KeyCode::Char('p'));
+        assert_eq!(app.view, View::Experiments);
+        assert_ne!(app.experiments.plot, before);
     }
 }

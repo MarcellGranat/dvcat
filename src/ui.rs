@@ -12,6 +12,7 @@ use ratatui::{
 
 mod dag;
 mod experiments;
+mod plots;
 
 use crate::{
     app::{App, Confirm, Focus, Run, RunPhase, View},
@@ -89,6 +90,13 @@ const DAG_KEYS: &[(&str, &str)] = &[
     ("e", "experiments"),
     ("q", "quit"),
 ];
+const PLOTS_KEYS: &[(&str, &str)] = &[
+    ("j/k", "plot"),
+    ("F5", "reload"),
+    ("1", "pipeline"),
+    ("e", "experiments"),
+    ("q", "quit"),
+];
 const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("j/k", "row"),
     ("h/l", "column"),
@@ -147,6 +155,10 @@ pub fn view(app: &App, frame: &mut Frame) {
         View::Dag => {
             dag::render(app, frame, main);
             DAG_KEYS
+        }
+        View::Plots => {
+            plots::render(app, frame, main);
+            PLOTS_KEYS
         }
     };
     // The popup floats over everything else.
@@ -272,6 +284,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         tab("1 Pipeline", app.view == View::Pipeline),
         tab("2 Graph (g)", app.view == View::Dag),
         tab("3 Experiments (e)", app.view == View::Experiments),
+        tab("4 Plots (p)", app.view == View::Plots),
     ]);
     // `Line::width` counts the displayed width, so the tabs hug the right edge.
     let [left_area, right_area] = Layout::horizontal([
@@ -1809,5 +1822,42 @@ mod tests {
         let mut files = demo_app();
         files.focus = Focus::Files;
         assert!(render(&files, 120, 20)[19].contains("g graph"));
+    }
+
+    #[test]
+    fn plots_view_lists_plots_draws_the_selected_one_and_explains_a_broken_one() {
+        let (_dir, mut app) = app_with_files(&[
+            (
+                "dvc.yaml",
+                "stages:\n  a:\n    cmd: echo\nplots:\n  - acc.csv:\n      x: epoch\n      title: Accuracy\n  - gone.csv\n",
+            ),
+            ("acc.csv", "epoch,acc\n1,0.5\n2,0.7\n3,0.9\n"),
+        ]);
+        app.update(crate::app::Event::Key(
+            ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char('p'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        let text = render(&app, 100, 24).join("\n");
+        assert!(
+            text.contains("Plots (2)") && text.contains("acc.csv") && text.contains("⚠ gone.csv"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Accuracy") && text.contains("━ acc"),
+            "{text}"
+        );
+        app.plots.selected = 1;
+        let text = render(&app, 100, 24).join("\n");
+        assert!(text.contains("cannot read gone.csv"), "{text}");
+    }
+
+    #[test]
+    fn plots_view_without_plots_shows_how_to_add_them() {
+        let mut app = demo_app();
+        app.view = View::Plots;
+        app.plots.data = Some(Ok(Vec::new()));
+        assert!(render(&app, 100, 24).join("\n").contains("plots:"));
     }
 }
