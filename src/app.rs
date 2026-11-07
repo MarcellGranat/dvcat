@@ -135,6 +135,8 @@ pub struct ExperimentsView {
     pub plot: bool,
     /// Which plottable metric the chart shows (`[` / `]`); taken modulo the number of metrics.
     pub plot_metric: usize,
+    /// Experiments across the top and params/metrics down the side (`t`).
+    pub transpose: bool,
     /// Param columns that are not shown (`v` / `H`).
     pub hidden: BTreeSet<String>,
 }
@@ -769,7 +771,20 @@ impl App {
     }
 
     fn on_experiments_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        // Transposed, the arrows follow the screen: down/up walk the fields, left/right the experiments.
+        let code = match (self.experiments.transpose, code) {
+            (true, KeyCode::Char('j')) => KeyCode::Char('l'),
+            (true, KeyCode::Down) => KeyCode::Right,
+            (true, KeyCode::Char('k')) => KeyCode::Char('h'),
+            (true, KeyCode::Up) => KeyCode::Left,
+            (true, KeyCode::Char('l')) => KeyCode::Char('j'),
+            (true, KeyCode::Right) => KeyCode::Down,
+            (true, KeyCode::Char('h')) => KeyCode::Char('k'),
+            (true, KeyCode::Left) => KeyCode::Up,
+            (_, code) => code,
+        };
         match code {
+            KeyCode::Char('t') => self.experiments.transpose = !self.experiments.transpose,
             KeyCode::Char('j') | KeyCode::Down => self.experiments.row += 1,
             KeyCode::Char('k') | KeyCode::Up => {
                 self.experiments.row = self.experiments.row.saturating_sub(1);

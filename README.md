@@ -61,6 +61,7 @@ If none is found, pressing `r` explains where it looked.
 | `h` / `l`  | *(experiments)* move the column cursor   |
 | `s`        | *(experiments)* sort by the cursor column; again flips the direction |
 | `m`        | *(experiments)* show metrics of experiments as differences from their baseline (`▲ +0.1867`) and back |
+| `t`        | *(experiments)* transpose: experiments across the top, params and metrics down the side (`h`/`j`/`k`/`l` follow the screen) |
 | `F5`       | *(experiments)* reload with `dvc exp show --json` |
 | `n`        | *(experiments)* new experiment: a form with a name and every param, pre-filled from the row under the cursor |
 | `a` / `d`  | *(experiments)* apply / remove the experiment under the cursor, after a yes/no question |

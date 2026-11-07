@@ -73,6 +73,9 @@ fn title(app: &App) -> String {
             " · loading…"
         });
     }
+    if app.experiments.transpose {
+        title.push_str(" · transposed");
+    }
     if app.experiments.deltas {
         title.push_str(" · metrics as differences from the baseline");
     }
@@ -83,6 +86,9 @@ fn title(app: &App) -> String {
 }
 
 fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: Rect) {
+    if view.transpose {
+        return render_transposed(view, table, frame, area);
+    }
     let [table_area, info_area] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
@@ -128,6 +134,99 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
         .column_spacing(COLUMN_SPACING as u16)
         .row_highlight_style(theme::selected());
     let mut state = TableState::default().with_selected(Some(view.row));
+    frame.render_stateful_widget(widget, table_area, &mut state);
+
+    let info = info_line(view, table, &columns[cursor_column], &rows);
+    frame.render_widget(info, info_area);
+}
+
+/// The table turned on its side: a column per experiment, a row per param or metric.
+/// The cursor keeps its meaning (`view.row` is the experiment, `view.column` the field).
+fn render_transposed(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: Rect) {
+    let [table_area, info_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+
+    let columns = view.columns(table);
+    let rows = table.ordered(&view.sort);
+    let cursor_column = view.column.min(columns.len().saturating_sub(1));
+    let cursor_row = view.row.min(rows.len().saturating_sub(1));
+    // The name column is the header here; the fields are everything else.
+    let fields: Vec<usize> = (0..columns.len())
+        .filter(|&i| !matches!(columns[i], Column::Name))
+        .collect();
+
+    let field_titles: Vec<String> = fields
+        .iter()
+        .map(|&f| match view.sort.direction_of(&columns[f]) {
+            Some(direction) => format!("{} {}", columns[f].title(), arrow(direction)),
+            None => columns[f].title().to_owned(),
+        })
+        .collect();
+    let cells: Vec<Vec<(String, Style)>> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            fields
+                .iter()
+                .map(|&f| body_cell(view, &rows, index, &columns[f]))
+                .collect()
+        })
+        .collect();
+    let headers: Vec<String> = rows.iter().map(|row| name_cell(row)).collect();
+
+    // Index 0 is the field-name column, then one entry per experiment, like `visible_columns` expects.
+    let label_width = field_titles
+        .iter()
+        .map(|t| t.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(MAX_COLUMN_WIDTH);
+    let mut widths = vec![label_width];
+    for (index, header) in headers.iter().enumerate() {
+        let widest = cells[index]
+            .iter()
+            .map(|(text, _)| text.chars().count())
+            .chain([header.chars().count()])
+            .max()
+            .unwrap_or(0);
+        widths.push(widest.min(MAX_COLUMN_WIDTH));
+    }
+    let shown = visible_columns(&widths, cursor_row + 1, usize::from(table_area.width));
+
+    let header = TableRow::new(shown.iter().map(|&i| {
+        if i == 0 {
+            return Cell::from("");
+        }
+        let mut style = row_style(rows[i - 1]).add_modifier(Modifier::BOLD);
+        if i - 1 == cursor_row {
+            style = style.add_modifier(Modifier::UNDERLINED);
+        }
+        Cell::from(fit(&headers[i - 1], widths[i])).style(style)
+    }));
+
+    let body: Vec<TableRow> = fields
+        .iter()
+        .enumerate()
+        .map(|(field_index, &f)| {
+            let title_style = Style::new().fg(header_color(&columns[f]));
+            TableRow::new(shown.iter().map(|&i| {
+                if i == 0 {
+                    Cell::from(fit(&field_titles[field_index], widths[0])).style(title_style)
+                } else {
+                    let (text, style) = &cells[i - 1][field_index];
+                    Cell::from(fit(text, widths[i])).style(*style)
+                }
+            }))
+        })
+        .collect();
+
+    let constraints = shown.iter().map(|&i| Constraint::Length(widths[i] as u16));
+    let widget = TableWidget::new(body, constraints)
+        .header(header)
+        .column_spacing(COLUMN_SPACING as u16)
+        .row_highlight_style(theme::selected());
+    let selected = fields.iter().position(|&f| f == cursor_column);
+    let mut state = TableState::default().with_selected(selected);
     frame.render_stateful_widget(widget, table_area, &mut state);
 
     let info = info_line(view, table, &columns[cursor_column], &rows);
@@ -850,5 +949,44 @@ mod tests {
             !short.contains(" vs "),
             "table only when there is no room:\n{short}"
         );
+    }
+
+    #[test]
+    fn transposed_puts_experiments_across_and_fields_down() {
+        let mut app = app_showing(Some(Ok(two())));
+        app.experiments.transpose = true;
+        let rows = screen(&app, 120, 14);
+        let header = rows
+            .iter()
+            .find(|r| r.contains("workspace"))
+            .expect("header")
+            .clone();
+        assert!(header.contains("└"), "{header}");
+        let lr = line_with(&rows, "train.lr");
+        assert!(!lr.contains("workspace"), "{lr}");
+        assert!(rows.join("\n").contains("transposed"), "{rows:?}");
+    }
+
+    #[test]
+    fn transposed_arrows_follow_the_screen() {
+        use crate::app::Event;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = app_showing(Some(Ok(two())));
+        app.view = View::Experiments;
+        let press = |app: &mut App, c: char| {
+            app.update(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        };
+        press(&mut app, 't');
+        assert!(app.experiments.transpose);
+        press(&mut app, 'j'); // down the side: the next field
+        assert_eq!((app.experiments.row, app.experiments.column), (0, 1));
+        press(&mut app, 'l'); // across: the next experiment
+        assert_eq!((app.experiments.row, app.experiments.column), (1, 1));
+        press(&mut app, 't');
+        press(&mut app, 'j');
+        assert_eq!(app.experiments.row, 2);
     }
 }
