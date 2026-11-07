@@ -86,7 +86,7 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
     let [table_area, info_area] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
-    let columns = table.columns();
+    let columns = view.columns(table);
     let rows = table.ordered(&view.sort);
     let widths = column_widths(view, &columns, &rows);
     let cursor_column = view.column.min(columns.len().saturating_sub(1));
@@ -147,7 +147,7 @@ fn render_plot(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: R
         return;
     }
     let metric = &metrics[view.plot_metric % metrics.len()];
-    let columns = table.columns();
+    let columns = view.columns(table);
     let plot = plot::plot(table, &view.sort, columns.get(view.column), metric);
 
     let all: Vec<(f64, f64)> = plot.points.iter().map(|p| (p.x, p.y)).collect();
@@ -222,6 +222,14 @@ fn info_line<'a>(
         if let Some(timestamp) = &row.timestamp {
             parts.push(timestamp.replace('T', " "));
         }
+    }
+    let hidden = table
+        .param_columns
+        .iter()
+        .filter(|label| view.hidden.contains(*label))
+        .count();
+    if hidden > 0 {
+        parts.push(format!("{hidden} params hidden (v)"));
     }
     Paragraph::new(parts.join("  ·  ")).style(theme::muted())
 }
@@ -508,6 +516,20 @@ mod tests {
             |y: u16| terminal.backend().buffer()[(5, y)].style().bg == Some(theme::SURFACE0);
         assert!(highlighted(y));
         assert!(!highlighted(y + 1));
+    }
+
+    #[test]
+    fn hidden_params_have_no_column_and_the_info_line_counts_them() {
+        let mut app = app_showing(Some(Ok(two())));
+        let before = screen(&app, 150, 14).join("\n");
+        assert!(before.contains("params.yaml:train.lr"), "{before}");
+        app.experiments.hidden.insert("params.yaml:train.lr".into());
+        let rows = screen(&app, 150, 14);
+        assert!(
+            !rows.join("\n").contains("params.yaml:train.lr"),
+            "{rows:?}"
+        );
+        assert!(line_with(&rows, "column:").contains("1 params hidden (v)"));
     }
 
     #[test]

@@ -66,6 +66,8 @@ If none is found, pressing `r` explains where it looked.
 | `a` / `d`  | *(experiments)* apply / remove the experiment under the cursor, after a yes/no question |
 | `b`        | *(experiments)* save the experiment under the cursor as a Git branch (`dvc exp branch`); asks for the name |
 | `p`        | *(experiments)* show / hide a chart of one metric across the experiments |
+| `v`        | *(experiments)* choose which params are shown: a list grouped by file and group (`train.*`); `Space` hides or shows a whole group, `a` shows all, `Esc` closes |
+| `H`        | *(experiments)* hide the param column under the cursor |
 | `[` / `]`  | *(experiments)* previous / next metric in the chart |
 
 **Apply and remove.** `a` runs `dvc exp apply <name>`: it overwrites params, lock file, metrics and outputs in your workspace.
@@ -110,6 +112,8 @@ A `dvc` process that dvcat did not start (another terminal, another tool) is not
 Press `X` to stop it: after a `y` it gets SIGTERM, together with what it started, and SIGKILL after 5 seconds.
 A run of yours that fails on the lock opens the same question by itself.
 Pressing `r`/`R` on a stage that would clash with an outside run (it reads what the other writes, or writes what the other reads or writes) is refused with the reason, e.g. `it reads data/md_files, which `dvc repro pdf2md` (PID 3134785) is writing`. Its output cannot be followed, because dvcat has no access to it.
+
+The hidden params are remembered per project (`.dvc/tmp/dvcat-history.json`), and the info line under the table says how many are hidden.
 
 ## Run times
 

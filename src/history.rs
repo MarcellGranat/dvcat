@@ -4,7 +4,7 @@
 //! in `.dvc/tmp/`, which DVC already keeps out of Git; a project without `.dvc` keeps nothing.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
     time::Duration,
@@ -72,6 +72,9 @@ pub struct History {
     /// Seconds each experiment took, by experiment name.
     #[serde(default)]
     pub experiments: BTreeMap<String, f64>,
+    /// Param columns hidden in the experiments table.
+    #[serde(default)]
+    pub hidden_params: BTreeSet<String>,
 }
 
 fn path(root: &Path) -> PathBuf {
@@ -146,6 +149,7 @@ mod tests {
             },
         );
         history.experiments.insert("lr-005".into(), 12.5);
+        history.hidden_params.insert("params.yaml:seed".into());
         save(dir.path(), &history).unwrap();
         assert_eq!(load(dir.path()), history);
     }

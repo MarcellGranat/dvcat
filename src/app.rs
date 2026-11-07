@@ -1,7 +1,7 @@
 //! Application state and the one place that changes it.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::mpsc::Sender,
     thread,
@@ -19,6 +19,7 @@ use crate::{
     graph::Graph,
     history::{self, History, StoredOutcome, StoredRun},
     log::LogBuffer,
+    params_filter::{ParamPicker, PickerAction},
     project::{Project, Stage},
     prompt::{Prompt, PromptAction},
     runner::{self, Attached, DvcNotFound, KILL_GRACE, RunOutcome, RunRecord, RunningJob},
@@ -123,11 +124,18 @@ pub struct ExperimentsView {
     pub plot: bool,
     /// Which plottable metric the chart shows (`[` / `]`); taken modulo the number of metrics.
     pub plot_metric: usize,
+    /// Param columns that are not shown (`v` / `H`).
+    pub hidden: BTreeSet<String>,
 }
 
 impl ExperimentsView {
     pub fn table(&self) -> Option<&Table> {
         self.data.as_ref()?.as_ref().ok()
+    }
+
+    /// The columns on screen: those of `table` minus the hidden params.
+    pub fn columns(&self, table: &Table) -> Vec<experiments::Column> {
+        table.columns_hiding(&self.hidden)
     }
 }
 
@@ -325,6 +333,8 @@ pub struct App {
     pub external: Vec<external::ExternalRun>,
     external_checked: Option<Instant>,
     pub prompt: Option<Prompt>,
+    /// The open list for hiding param columns; modal like the preview.
+    pub param_picker: Option<ParamPicker>,
     /// The latest finished run of each stage started from this session (DVC keeps no durations).
     pub last_runs: BTreeMap<String, LastRun>,
     /// Seconds each experiment took, by name, for the experiments table.
@@ -363,6 +373,7 @@ impl App {
             external: Vec::new(),
             external_checked: None,
             prompt: None,
+            param_picker: None,
             last_runs: BTreeMap::new(),
             experiment_times: BTreeMap::new(),
             persist_history: false,
@@ -389,6 +400,7 @@ impl App {
             );
         }
         self.experiment_times.extend(remembered.experiments);
+        self.experiments.hidden = remembered.hidden_params;
         self.persist_history = true;
     }
 
@@ -413,6 +425,7 @@ impl App {
         let history = History {
             stages,
             experiments: self.experiment_times.clone(),
+            hidden_params: self.experiments.hidden.clone(),
         };
         // A history that cannot be written is not worth interrupting the user for.
         let _ = history::save(&self.project.root, &history);
@@ -527,6 +540,9 @@ impl App {
         }
         if self.prompt.is_some() {
             return self.on_prompt_key(key);
+        }
+        if self.param_picker.is_some() {
+            return self.on_picker_key(key);
         }
         // An open popup is modal: it gets every key, so `q` closes it instead of quitting.
         if self.preview.is_some() {
@@ -716,6 +732,8 @@ impl App {
             KeyCode::Char('p') => self.experiments.plot = !self.experiments.plot,
             KeyCode::Char('[') => self.cycle_plot_metric(false),
             KeyCode::Char(']') => self.cycle_plot_metric(true),
+            KeyCode::Char('v') => self.open_param_picker(),
+            KeyCode::Char('H') => self.hide_cursor_param(),
             KeyCode::Char('n') => self.open_experiment_form(),
             KeyCode::Char('b') => self.open_branch_prompt(),
             KeyCode::Char('a') => self.ask_about_selected_experiment(Action::Apply),
@@ -726,6 +744,46 @@ impl App {
         }
         self.clamp_experiments_cursor();
         Vec::new()
+    }
+
+    fn open_param_picker(&mut self) {
+        match self.experiments.table() {
+            Some(table) if !table.param_columns.is_empty() => {
+                self.param_picker = Some(ParamPicker::new(&table.param_columns));
+            }
+            _ => self.notice = Some("there are no params to choose from".to_owned()),
+        }
+    }
+
+    fn on_picker_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if let Some(mut picker) = self.param_picker.take() {
+            match picker.on_key(key, &mut self.experiments.hidden) {
+                PickerAction::Continue => self.param_picker = Some(picker),
+                PickerAction::Changed => {
+                    self.param_picker = Some(picker);
+                    self.save_history();
+                    self.clamp_experiments_cursor();
+                }
+                PickerAction::Close => {}
+            }
+        }
+        Vec::new()
+    }
+
+    /// `H`: hide the param column under the cursor (`v` brings it back).
+    fn hide_cursor_param(&mut self) {
+        let Some(table) = self.experiments.table() else {
+            return;
+        };
+        match self.experiments.columns(table).get(self.experiments.column) {
+            Some(experiments::Column::Param(label)) => {
+                let label = label.clone();
+                self.experiments.hidden.insert(label);
+                self.notice = Some("param hidden; v lists and restores hidden params".to_owned());
+                self.save_history();
+            }
+            _ => self.notice = Some("H hides the param column under the cursor".to_owned()),
+        }
     }
 
     fn cycle_plot_metric(&mut self, forward: bool) {
@@ -900,7 +958,12 @@ impl App {
         let Some(table) = self.experiments.table() else {
             return;
         };
-        let Some(column) = table.columns().into_iter().nth(self.experiments.column) else {
+        let Some(column) = self
+            .experiments
+            .columns(table)
+            .into_iter()
+            .nth(self.experiments.column)
+        else {
             return;
         };
         self.experiments.sort.choose(column);
@@ -908,10 +971,9 @@ impl App {
 
     /// Keep the cursor on an existing row and column (the table may have shrunk or be absent).
     fn clamp_experiments_cursor(&mut self) {
-        let (rows, columns) = self
-            .experiments
-            .table()
-            .map_or((0, 0), |table| (table.rows.len(), table.columns().len()));
+        let (rows, columns) = self.experiments.table().map_or((0, 0), |table| {
+            (table.rows.len(), self.experiments.columns(table).len())
+        });
         self.experiments.row = self.experiments.row.min(rows.saturating_sub(1));
         self.experiments.column = self.experiments.column.min(columns.saturating_sub(1));
     }
@@ -2302,6 +2364,66 @@ mod experiments_view_tests {
         h.press(KeyCode::Char('e'));
         h.wait_for_data();
         h
+    }
+
+    #[test]
+    fn v_lists_params_and_space_hides_a_whole_group() {
+        let mut h = with_table_loaded();
+        let all = h
+            .app
+            .experiments
+            .columns(h.app.experiments.table().unwrap())
+            .len();
+        h.press(KeyCode::Char('v'));
+        assert!(h.app.param_picker.is_some());
+        // The picker is modal: q closes it instead of quitting.
+        h.press(KeyCode::Char(' ')); // first entry: the whole first file
+        let now = h
+            .app
+            .experiments
+            .columns(h.app.experiments.table().unwrap())
+            .len();
+        assert!(now < all, "{now} < {all}");
+        assert!(!h.app.experiments.hidden.is_empty());
+        h.press(KeyCode::Char('q'));
+        assert!(h.app.param_picker.is_none());
+        assert!(!h.app.should_quit);
+        // Space again (reopen) brings them back; `a` shows everything at once.
+        h.press(KeyCode::Char('v'));
+        h.press(KeyCode::Char('a'));
+        assert!(h.app.experiments.hidden.is_empty());
+    }
+
+    #[test]
+    fn capital_h_hides_the_param_under_the_cursor_only() {
+        let mut h = with_table_loaded();
+        h.press(KeyCode::Char('H')); // on the name column
+        assert!(h.app.experiments.hidden.is_empty());
+        let table = h.app.experiments.table().unwrap();
+        let position = h
+            .app
+            .experiments
+            .columns(table)
+            .iter()
+            .position(|c| matches!(c, experiments::Column::Param(_)))
+            .unwrap();
+        h.app.experiments.column = position;
+        h.press(KeyCode::Char('H'));
+        assert_eq!(h.app.experiments.hidden.len(), 1);
+    }
+
+    #[test]
+    fn the_cursor_stays_inside_the_table_when_columns_disappear() {
+        let mut h = with_table_loaded();
+        h.app.experiments.column = 99;
+        h.press(KeyCode::Char('v'));
+        h.press(KeyCode::Char(' '));
+        let columns = h
+            .app
+            .experiments
+            .columns(h.app.experiments.table().unwrap())
+            .len();
+        assert!(h.app.experiments.column < columns);
     }
 
     fn calls(h: &Harness) -> Vec<String> {

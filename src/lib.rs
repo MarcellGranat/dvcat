@@ -11,6 +11,7 @@ pub mod form;
 pub mod graph;
 pub mod history;
 pub mod log;
+pub mod params_filter;
 pub mod plot;
 pub mod project;
 pub mod prompt;

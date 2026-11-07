@@ -1,5 +1,7 @@
 //! Drawing. Everything here takes `&App`: it can read state but never change it.
 
+use std::collections::BTreeSet;
+
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -16,6 +18,7 @@ use crate::{
     files::{FileEntry, FileKind, Preview, PreviewBody},
     form::ExperimentForm,
     history::format_duration,
+    params_filter::{ParamPicker, Shown},
     project::{ParamRef, flatten_leaves, param_value},
     prompt::Prompt,
     runner::RunOutcome,
@@ -68,6 +71,12 @@ const PROMPT_KEYS: &[(&str, &str)] = &[
     ("Enter", "create"),
     ("Esc", "cancel"),
 ];
+const PICKER_KEYS: &[(&str, &str)] = &[
+    ("j/k", "move"),
+    ("Space", "hide/show"),
+    ("a", "show all"),
+    ("Esc", "close"),
+];
 const CONFIRM_KEYS: &[(&str, &str)] = &[("y/Enter", "yes"), ("n/Esc", "no")];
 const DAG_KEYS: &[(&str, &str)] = &[
     ("h/l", "upstream/downstream"),
@@ -87,6 +96,8 @@ const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("m", "deltas"),
     ("p", "plot"),
     ("[ ]", "metric"),
+    ("v", "params"),
+    ("H", "hide col"),
     ("n", "new"),
     ("a", "apply"),
     ("b", "branch"),
@@ -151,6 +162,14 @@ pub fn view(app: &App, frame: &mut Frame) {
         Some(form) => {
             render_form(form, frame, main);
             FORM_KEYS
+        }
+        None => keys,
+    };
+
+    let keys = match &app.param_picker {
+        Some(picker) => {
+            render_param_picker(picker, &app.experiments.hidden, frame, main);
+            PICKER_KEYS
         }
         None => keys,
     };
@@ -595,6 +614,56 @@ fn render_form(form: &ExperimentForm, frame: &mut Frame, area: Rect) {
         (None, None) => Line::from(""),
     };
     frame.render_widget(Paragraph::new(status), status_area);
+}
+
+/// The list for hiding param columns, in the middle of the screen.
+fn render_param_picker(
+    picker: &ParamPicker,
+    hidden: &BTreeSet<String>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let width = (area.width * 60 / 100).max(40).min(area.width);
+    let height = (picker.entries.len() as u16 + 2)
+        .clamp(5, area.height.max(5))
+        .min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let items: Vec<ListItem> = picker
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let (mark, color) = match picker.shown(index, hidden) {
+                Shown::All => ("[x]", theme::GREEN),
+                Shown::Some => ("[-]", theme::YELLOW),
+                Shown::None => ("[ ]", theme::OVERLAY0),
+            };
+            let count = if entry.members.len() > 1 {
+                format!("  ({})", entry.members.len())
+            } else {
+                String::new()
+            };
+            Line::from(vec![
+                Span::raw("  ".repeat(entry.depth)),
+                Span::styled(mark, Style::new().fg(color)),
+                Span::raw(format!(" {}", entry.text)),
+                Span::styled(count, theme::muted()),
+            ])
+            .into()
+        })
+        .collect();
+    let list = List::new(items)
+        .block(pane("Params shown in the table", true).border_style(Style::new().fg(theme::PEACH)))
+        .highlight_style(theme::selected())
+        .highlight_symbol("▌ ");
+    let mut state = ListState::default().with_selected(Some(picker.cursor));
+    frame.render_stateful_widget(list, popup, &mut state);
 }
 
 /// A small yes/no popup in the middle of the screen.

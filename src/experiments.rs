@@ -211,6 +211,11 @@ fn error_text(error: &Value) -> String {
 impl Table {
     /// `name`, then every param column, then every metric column.
     pub fn columns(&self) -> Vec<Column> {
+        self.columns_hiding(&BTreeSet::new())
+    }
+
+    /// Like [`Table::columns`], without the params whose labels are in `hidden`.
+    pub fn columns_hiding(&self, hidden: &BTreeSet<String>) -> Vec<Column> {
         std::iter::once(Column::Name)
             // Next to the name, which is always on screen; at the far right it would scroll out of sight.
             .chain(
@@ -219,7 +224,13 @@ impl Table {
                     .any(|row| row.run_secs.is_some())
                     .then_some(Column::Duration),
             )
-            .chain(self.param_columns.iter().cloned().map(Column::Param))
+            .chain(
+                self.param_columns
+                    .iter()
+                    .filter(|label| !hidden.contains(*label))
+                    .cloned()
+                    .map(Column::Param),
+            )
             .chain(self.metric_columns.iter().cloned().map(Column::Metric))
             .collect()
     }
