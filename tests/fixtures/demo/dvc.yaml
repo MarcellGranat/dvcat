@@ -28,3 +28,16 @@ stages:
     metrics:
       - metrics.json:
           cache: false
+plots:
+  - training:
+      x: epoch
+      y:
+        plots/history.csv: [loss, val_loss]
+      title: Training curve
+      x_label: epoch
+      y_label: loss
+  - data/features.csv:
+      x: x
+      y: [y, x_scaled]
+      template: scatter
+      title: Features

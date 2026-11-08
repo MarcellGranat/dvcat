@@ -716,4 +716,15 @@ mod tests {
         let (x0, x1, y0, y1) = Plot::bounds(&series);
         assert!(x0 < 0.0 && x1 > 10.0 && y0 < 1.0 && y1 > 1.0);
     }
+
+    #[test]
+    fn the_demo_project_has_a_training_curve_and_a_scatter() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/demo");
+        let plots = load(&root).unwrap();
+        let ids: Vec<_> = plots.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["training", "data/features.csv"]);
+        assert_eq!(lines_of(&plots[0]).len(), 2);
+        assert_eq!(plots[1].template, Template::Scatter);
+        assert!(plots.iter().all(|p| matches!(p.content, Content::Lines(_))));
+    }
 }

@@ -13,7 +13,7 @@ export GIT_COMMITTER_NAME=demo GIT_COMMITTER_EMAIL=demo@example.com
 
 rm -rf "$DEST"
 mkdir -p "$DEST"
-cp -r "$SRC/src" "$SRC/data" "$SRC/dvc.yaml" "$SRC/params.yaml" "$DEST/"
+cp -r "$SRC/src" "$SRC/data" "$SRC/plots" "$SRC/dvc.yaml" "$SRC/params.yaml" "$DEST/"
 rm -f "$DEST/data/prepared.csv" "$DEST/data/features.csv"
 cd "$DEST"
 
