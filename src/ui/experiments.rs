@@ -24,6 +24,10 @@ use crate::{
 /// The plot needs this much height in the experiments area, else it is not drawn.
 const PLOT_MIN_AREA_HEIGHT: u16 = 12;
 const PLOT_MAX_HEIGHT: u16 = 14;
+const MESSAGE_HEIGHT: u16 = 4;
+const MESSAGE_MIN_AREA_HEIGHT: u16 = 14;
+const HINT_NO_MESSAGE: &str =
+    "no message — give one with `dvc exp run -m \"...\"`, or press c to write it";
 const MAX_COLUMN_WIDTH: usize = 28;
 const COLUMN_SPACING: usize = 2;
 const ELLIPSIS: char = '…';
@@ -52,16 +56,55 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
                 .wrap(Wrap { trim: false });
             frame.render_widget(error, inner);
         }
-        Some(Ok(table)) if view.plot && inner.height >= PLOT_MIN_AREA_HEIGHT => {
-            let chart_height = (inner.height / 2).min(PLOT_MAX_HEIGHT);
-            let [table_area, chart_area] =
-                Layout::vertical([Constraint::Min(4), Constraint::Length(chart_height)])
+        Some(Ok(table)) if inner.height >= MESSAGE_MIN_AREA_HEIGHT => {
+            let [rest, message_area] =
+                Layout::vertical([Constraint::Min(4), Constraint::Length(MESSAGE_HEIGHT)])
                     .areas(inner);
-            render_table(view, table, frame, table_area);
-            render_plot(view, table, frame, chart_area);
+            render_body(view, table, frame, rest);
+            render_message(view, table, frame, message_area);
         }
-        Some(Ok(table)) => render_table(view, table, frame, inner),
+        Some(Ok(table)) => render_body(view, table, frame, inner),
     }
+}
+
+/// The table, with the chart under it when it is switched on.
+fn render_body(view: &ExperimentsView, table: &Table, frame: &mut Frame, inner: Rect) {
+    if view.plot && inner.height >= PLOT_MIN_AREA_HEIGHT {
+        let chart_height = (inner.height / 2).min(PLOT_MAX_HEIGHT);
+        let [table_area, chart_area] =
+            Layout::vertical([Constraint::Min(4), Constraint::Length(chart_height)]).areas(inner);
+        render_table(view, table, frame, table_area);
+        render_plot(view, table, frame, chart_area);
+    } else {
+        render_table(view, table, frame, inner);
+    }
+}
+
+/// The commit message of the experiment under the cursor (`c` edits it).
+fn render_message(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: Rect) {
+    let rows = table.ordered(&view.sort);
+    let row = rows.get(view.row);
+    let (title, text, style) = match row {
+        Some(row) => match table.message_of(row) {
+            Some(message) => (
+                format!("Message · {}", row.label),
+                message.to_owned(),
+                Style::new().fg(theme::TEXT),
+            ),
+            None if row.kind == RowKind::Experiment => (
+                format!("Message · {}", row.label),
+                HINT_NO_MESSAGE.to_owned(),
+                theme::muted(),
+            ),
+            None => ("Message".to_owned(), String::new(), theme::muted()),
+        },
+        None => ("Message".to_owned(), String::new(), theme::muted()),
+    };
+    let paragraph = Paragraph::new(text)
+        .style(style)
+        .block(super::pane(title, false))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 fn title(app: &App) -> String {
@@ -492,6 +535,43 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| crate::ui::view(app, frame)).unwrap();
         terminal
+    }
+
+    #[test]
+    fn the_message_of_the_selected_experiment_is_shown_under_the_table() {
+        let mut table = two();
+        let rev = table
+            .rows
+            .iter()
+            .find(|r| r.label == "lr-005")
+            .unwrap()
+            .rev
+            .clone();
+        table
+            .messages
+            .insert(rev, "lagged features, expect better auc".to_owned());
+        let mut app = app_showing(Some(Ok(table)));
+        let rows = screen(&app, 120, 30);
+        assert!(!rows.iter().any(|r| r.contains("lagged features")));
+        let table = app.experiments.table().unwrap();
+        app.experiments.row = table
+            .ordered(&app.experiments.sort)
+            .iter()
+            .position(|r| r.label == "lr-005")
+            .unwrap();
+        let rows = screen(&app, 120, 30);
+        assert!(line_with(&rows, "Message").contains("lr-005"));
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("lagged features, expect better auc"))
+        );
+        // An experiment without one says how to add it.
+        app.experiments.row -= 1; // lr-010
+        let rows = screen(&app, 120, 30);
+        assert!(
+            rows.iter().any(|r| r.contains("press c to write it")),
+            "{rows:#?}"
+        );
     }
 
     fn rows_of(terminal: &Terminal<TestBackend>) -> Vec<String> {

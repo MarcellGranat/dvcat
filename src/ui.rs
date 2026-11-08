@@ -85,7 +85,7 @@ const STAGE_FORM_KEYS: &[(&str, &str)] = &[
 const PROMPT_KEYS: &[(&str, &str)] = &[
     ("type", "edit"),
     ("Ctrl+U", "clear"),
-    ("Enter", "create"),
+    ("Enter", "ok"),
     ("Esc", "cancel"),
 ];
 const PICKER_KEYS: &[(&str, &str)] = &[
@@ -122,6 +122,7 @@ const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("s", "sort"),
     ("m", "deltas"),
     ("t", "transpose"),
+    ("c", "comment"),
     ("p", "plot"),
     ("[ ]", "metric"),
     ("v", "params"),
@@ -784,7 +785,7 @@ fn render_prompt(prompt: &Prompt, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(line), field);
     let message = match &prompt.error {
         Some(error) => Line::styled(format!("⚠ {error}"), Style::new().fg(theme::RED)),
-        None => Line::styled("creates the branch; it is not checked out", theme::muted()),
+        None => Line::styled(prompt.hint, theme::muted()),
     };
     frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), status);
 }
@@ -1544,7 +1545,7 @@ mod tests {
         assert!(text.contains("branch name  lr-005-branch▏"), "{text}");
         assert!(text.contains("not checked out"), "{text}");
         assert!(
-            rows[23].contains("Enter create") && rows[23].contains("Esc cancel"),
+            rows[23].contains("Enter ok") && rows[23].contains("Esc cancel"),
             "{rows:#?}"
         );
         for (w, h) in [(10, 4), (1, 1)] {

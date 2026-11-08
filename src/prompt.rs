@@ -13,7 +13,20 @@ pub struct Prompt {
     pub value: String,
     /// Why the last Enter was refused.
     pub error: Option<String>,
+    pub kind: PromptKind,
+    /// Shown under the field while there is no error.
+    pub hint: &'static str,
     validate: fn(&str) -> Result<(), String>,
+}
+
+/// What the answer is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptKind {
+    Branch,
+    /// A new message for the experiment commit `rev`; the answer replaces the first line.
+    Comment {
+        rev: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +45,25 @@ impl Prompt {
             target: experiment.to_owned(),
             value: format!("{experiment}-branch"),
             error: None,
+            kind: PromptKind::Branch,
+            hint: "creates the branch; it is not checked out",
             validate: validate_branch_name,
+        }
+    }
+
+    /// Edit the first line of the message of `experiment` (the commit `rev`).
+    pub fn comment(experiment: &str, rev: &str, subject: &str) -> Self {
+        Self {
+            title: format!("Comment on {experiment}"),
+            label: "message".to_owned(),
+            target: experiment.to_owned(),
+            value: subject.to_owned(),
+            error: None,
+            kind: PromptKind::Comment {
+                rev: rev.to_owned(),
+            },
+            hint: "rewrites the experiment's commit message (the commit id changes, the name stays)",
+            validate: validate_comment,
         }
     }
 
@@ -56,6 +87,13 @@ impl Prompt {
             }
         }
     }
+}
+
+fn validate_comment(text: &str) -> Result<(), String> {
+    if text.is_empty() {
+        return Err("the message is empty".to_owned());
+    }
+    Ok(())
 }
 
 /// A conservative subset of `git check-ref-format`, enough to explain the problem before DVC runs.
@@ -100,6 +138,20 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn a_comment_starts_with_the_old_text_and_refuses_an_empty_one() {
+        let mut prompt = Prompt::comment("lr-1", "abc", "old");
+        assert_eq!(prompt.value, "old");
+        prompt.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(prompt.on_key(key(KeyCode::Enter)), PromptAction::Continue);
+        assert!(prompt.error.is_some());
+        prompt.on_key(key(KeyCode::Char('x')));
+        assert_eq!(
+            prompt.on_key(key(KeyCode::Enter)),
+            PromptAction::Submit("x".into())
+        );
     }
 
     #[test]

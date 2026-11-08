@@ -66,6 +66,7 @@ If none is found, pressing `r` explains where it looked.
 | `F5`       | *(experiments)* reload with `dvc exp show --json` |
 | `n`        | *(experiments)* new experiment: a form with a name and every param, pre-filled from the row under the cursor |
 | `a` / `d`  | *(experiments)* apply / remove the experiment under the cursor, after a yes/no question |
+| `c`        | *(experiments)* edit the message of the experiment under the cursor (the text of `dvc exp run -m`); it is shown under the table |
 | `b`        | *(experiments)* save the experiment under the cursor as a Git branch (`dvc exp branch`); asks for the name |
 | `p`        | *(experiments)* show / hide a chart of one metric across the experiments |
 | `v`        | *(experiments)* choose which params are shown: a list grouped by file and group (`train.*`); `Space` hides or shows a whole group, `a` shows all, `Esc` closes |
@@ -76,6 +77,8 @@ If none is found, pressing `r` explains where it looked.
 DVC first saves your uncommitted changes (undo with `git reset --hard && git stash apply refs/exps/apply/stash`).
 `d` runs `dvc exp remove <name>`, which cannot be undone unless the experiment was pushed. Both only work on experiment rows,
 show DVC's output in the log, and reload the table afterwards.
+
+**Messages.** The text given with `dvc exp run -m "..."` is the message of the experiment's Git commit; the table shows it under the rows. `c` edits its first line (the rest is kept). DVC has no command for this, so dvcat writes a copy of the commit with the new message and moves the experiment's ref to it: the name stays, the commit id changes.
 
 **Branch.** `b` opens a prompt pre-filled with `<experiment>-branch`; names Git would reject are refused with a reason.
 The branch is created but **not** checked out; the footer tells you the `git switch` command.

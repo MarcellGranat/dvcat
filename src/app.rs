@@ -21,11 +21,12 @@ use crate::{
     graph::{self, Graph},
     history::{self, History, StoredOutcome, StoredRun},
     log::LogBuffer,
+    messages,
     params_filter::{ParamPicker, PickerAction},
     plot_form::{PlotForm, PlotFormAction},
     plots::{self, Plot},
     project::{self, DEFAULT_PARAMS_FILE, Project, Stage},
-    prompt::{Prompt, PromptAction},
+    prompt::{Prompt, PromptAction, PromptKind},
     runner::{self, Attached, DvcNotFound, KILL_GRACE, RunOutcome, RunRecord, RunningJob},
     stage_form::{self, Pick, StageForm, StageFormAction},
     stale::{self, StageStatus},
@@ -198,6 +199,11 @@ pub enum Effect {
     OpenEditor(String),
     /// Stop `dvc` processes that were started outside dvcat (by process id).
     StopExternal(Vec<u32>),
+    /// Give the experiment commit `rev` a new message, then reload the table.
+    SaveMessage {
+        rev: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1024,6 +1030,7 @@ impl App {
             KeyCode::Char('H') => self.hide_cursor_param(),
             KeyCode::Char('n') => self.open_experiment_form(),
             KeyCode::Char('b') => self.open_branch_prompt(),
+            KeyCode::Char('c') => self.open_comment_prompt(),
             KeyCode::Char('a') => self.ask_about_selected_experiment(Action::Apply),
             KeyCode::Char('d') => self.ask_about_selected_experiment(Action::Remove),
             KeyCode::F(5) => return self.request_experiments(),
@@ -1164,6 +1171,25 @@ impl App {
         }
     }
 
+    fn open_comment_prompt(&mut self) {
+        let Some(table) = self.experiments.table() else {
+            self.notice = Some("experiments are not available (press F5 to load them)".to_owned());
+            return;
+        };
+        let rows = table.ordered(&self.experiments.sort);
+        let Some(row) = rows
+            .get(self.experiments.row)
+            .filter(|row| row.kind == RowKind::Experiment)
+        else {
+            self.notice = Some(
+                "select an experiment row first (not the workspace or the baseline)".to_owned(),
+            );
+            return;
+        };
+        let subject = table.message_of(row).map_or("", messages::subject);
+        self.prompt = Some(Prompt::comment(&row.label, &row.rev, subject));
+    }
+
     fn on_prompt_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         let running = self.is_running();
         let Some(prompt) = &mut self.prompt else {
@@ -1175,7 +1201,19 @@ impl App {
                 self.prompt = None;
                 Vec::new()
             }
-            PromptAction::Submit(branch) => {
+            PromptAction::Submit(text) => {
+                if let PromptKind::Comment { rev } = prompt.kind.clone() {
+                    let old = self
+                        .experiments
+                        .table()
+                        .and_then(|table| table.messages.get(&rev))
+                        .cloned()
+                        .unwrap_or_default();
+                    self.prompt = None;
+                    let message = messages::with_subject(&old, &text);
+                    return vec![Effect::SaveMessage { rev, message }];
+                }
+                let branch = text;
                 if running {
                     prompt.error = Some("a run is already in progress (x cancels it)".to_owned());
                     return Vec::new();
@@ -1505,6 +1543,18 @@ impl App {
                 thread::spawn(move || external::stop(&pids, external::KILL_GRACE));
             }
             Effect::FetchExperiments => self.fetch_experiments(tx),
+            Effect::SaveMessage { rev, message } => {
+                match messages::rewrite(&self.project.root, &rev, &message) {
+                    Ok(_) => {
+                        self.notice = Some("message saved".to_owned());
+                        self.experiments.loading = true;
+                        self.fetch_experiments(tx);
+                    }
+                    Err(error) => {
+                        self.notice = Some(format!("could not save the message: {error}"))
+                    }
+                }
+            }
             Effect::LoadPreview(path) => {
                 // The read is capped (see `files::PREVIEW_LIMIT`), so doing it here is fast.
                 let body = files::load(&self.project.root, &path);
@@ -2987,6 +3037,61 @@ mod experiments_view_tests {
                 .unwrap()
                 .contains("already in progress")
         );
+    }
+
+    // ----- experiment messages -----
+
+    fn give_message(h: &mut Harness, label: &str, message: &str) {
+        let Some(Ok(table)) = &mut h.app.experiments.data else {
+            panic!("no table");
+        };
+        let rev = table
+            .rows
+            .iter()
+            .find(|r| r.label == label)
+            .unwrap()
+            .rev
+            .clone();
+        table.messages.insert(rev, message.to_owned());
+    }
+
+    #[test]
+    fn c_edits_the_first_line_of_the_message_only_on_experiment_rows() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "master");
+        h.press(KeyCode::Char('c'));
+        assert!(h.app.prompt.is_none());
+        assert!(h.app.notice.as_deref().unwrap().contains("experiment row"));
+
+        give_message(&mut h, "lr-005", "try a bigger step\n\nlonger body");
+        cursor_on(&mut h, "lr-005");
+        h.press(KeyCode::Char('c'));
+        assert_eq!(h.app.prompt.as_ref().unwrap().value, "try a bigger step");
+
+        for _ in 0.."try a bigger step".len() {
+            h.press(KeyCode::Backspace);
+        }
+        for c in "new".chars() {
+            h.press(KeyCode::Char(c));
+        }
+        let effects = h.app.update(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(h.app.prompt.is_none());
+        let [Effect::SaveMessage { rev, message }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert!(rev.starts_with("58d3bd4"));
+        assert_eq!(message, "new\n\nlonger body");
+    }
+
+    #[test]
+    fn a_message_without_a_text_starts_with_an_empty_field() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "lr-005");
+        h.press(KeyCode::Char('c'));
+        assert_eq!(h.app.prompt.as_ref().unwrap().value, "");
     }
 
     // ----- exp branch -----

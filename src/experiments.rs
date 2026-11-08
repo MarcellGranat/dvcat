@@ -109,6 +109,8 @@ pub struct Table {
     /// Union of param labels across all rows, sorted.
     pub param_columns: Vec<String>,
     pub metric_columns: Vec<String>,
+    /// Full commit id -> the message given with `dvc exp run -m` (see [`crate::messages`]).
+    pub messages: BTreeMap<String, String>,
 }
 
 /// Parse the output of `dvc exp show --json`.
@@ -153,6 +155,7 @@ pub fn parse(json: &str) -> Result<Table, serde_json::Error> {
         rows,
         param_columns,
         metric_columns,
+        messages: BTreeMap::new(),
     })
 }
 
@@ -452,8 +455,21 @@ pub fn fetch(dvc: &Path, root: &Path) -> Result<Table, String> {
             .map_or("killed by a signal".to_owned(), |c| format!("exit {c}"));
         return Err(failure_message(&code, &stderr));
     }
-    parse(&String::from_utf8_lossy(&output.stdout))
-        .map_err(|error| format!("could not read the output of `dvc exp show --json`: {error}"))
+    let mut table = parse(&String::from_utf8_lossy(&output.stdout))
+        .map_err(|error| format!("could not read the output of `dvc exp show --json`: {error}"))?;
+    let revs: Vec<&str> = table.rows.iter().map(|row| row.rev.as_str()).collect();
+    table.messages = crate::messages::read_all(root, &revs);
+    Ok(table)
+}
+
+impl Table {
+    /// The commit message of `row`, when it has one.
+    pub fn message_of(&self, row: &Row) -> Option<&str> {
+        self.messages
+            .get(&row.rev)
+            .map(String::as_str)
+            .filter(|message| !message.is_empty())
+    }
 }
 
 /// DVC's own error, plus advice for the one failure that every newcomer hits.
@@ -713,6 +729,7 @@ mod tests {
             rows,
             param_columns: vec!["p:v".into()],
             metric_columns: vec![],
+            messages: BTreeMap::new(),
         }
     }
 

@@ -172,6 +172,7 @@ mod tests {
             rows,
             param_columns: vec!["p:lr".into()],
             metric_columns: vec!["m:auc".into()],
+            messages: Default::default(),
         }
     }
 
