@@ -66,6 +66,12 @@ const FORM_KEYS: &[(&str, &str)] = &[
     ("Enter", "run"),
     ("Esc", "cancel"),
 ];
+const PLOT_FORM_KEYS: &[(&str, &str)] = &[
+    ("Tab", "next field"),
+    ("Shift+Tab", "previous"),
+    ("Enter", "add to dvc.yaml"),
+    ("Esc", "cancel"),
+];
 const PROMPT_KEYS: &[(&str, &str)] = &[
     ("type", "edit"),
     ("Ctrl+U", "clear"),
@@ -92,6 +98,8 @@ const DAG_KEYS: &[(&str, &str)] = &[
 ];
 const PLOTS_KEYS: &[(&str, &str)] = &[
     ("j/k", "plot"),
+    ("d", "definition"),
+    ("n", "new plot"),
     ("F5", "reload"),
     ("1", "pipeline"),
     ("e", "experiments"),
@@ -175,6 +183,14 @@ pub fn view(app: &App, frame: &mut Frame) {
         Some(form) => {
             render_form(form, frame, main);
             FORM_KEYS
+        }
+        None => keys,
+    };
+
+    let keys = match &app.plot_form {
+        Some(form) => {
+            plots::render_form(form, &app.project.root, frame, main);
+            PLOT_FORM_KEYS
         }
         None => keys,
     };
@@ -1860,5 +1876,40 @@ mod tests {
         app.view = View::Plots;
         app.plots.data = Some(Ok(Vec::new()));
         assert!(render(&app, 100, 24).join("\n").contains("plots:"));
+    }
+
+    #[test]
+    fn plots_view_shows_the_definition_and_the_new_plot_form() {
+        let (_dir, mut app) = app_with_files(&[
+            (
+                "dvc.yaml",
+                "stages:\n  a:\n    cmd: echo\nplots:\n  - acc.csv:\n      x: epoch\n",
+            ),
+            ("acc.csv", "epoch,acc\n1,0.5\n2,0.7\n"),
+        ]);
+        let press = |app: &mut App, c: char| {
+            app.update(crate::app::Event::Key(
+                ratatui::crossterm::event::KeyEvent::new(
+                    ratatui::crossterm::event::KeyCode::Char(c),
+                    ratatui::crossterm::event::KeyModifiers::NONE,
+                ),
+            ));
+        };
+        press(&mut app, 'p');
+        press(&mut app, 'd');
+        let text = render(&app, 100, 28).join("\n");
+        assert!(
+            text.contains("Definition in dvc.yaml") && text.contains("x: epoch"),
+            "{text}"
+        );
+        press(&mut app, 'n');
+        for c in "acc.csv".chars() {
+            press(&mut app, c);
+        }
+        let text = render(&app, 100, 28).join("\n");
+        assert!(
+            text.contains("New plot") && text.contains("columns: epoch, acc"),
+            "{text}"
+        );
     }
 }

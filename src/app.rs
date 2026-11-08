@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::{Path, PathBuf},
     sync::mpsc::Sender,
     thread,
@@ -20,6 +21,7 @@ use crate::{
     history::{self, History, StoredOutcome, StoredRun},
     log::LogBuffer,
     params_filter::{ParamPicker, PickerAction},
+    plot_form::{PlotForm, PlotFormAction},
     plots::{self, Plot},
     project::{Project, Stage},
     prompt::{Prompt, PromptAction},
@@ -117,6 +119,8 @@ pub struct PlotsView {
     /// `None` until the view is first opened; read again by F5.
     pub data: Option<Result<Vec<Plot>, String>>,
     pub selected: usize,
+    /// Show the selected plot's definition from `dvc.yaml` under the chart (`d`).
+    pub definition: bool,
 }
 
 /// Everything the experiments view needs to remember.
@@ -342,6 +346,8 @@ pub struct App {
     pub dag: Layout,
     /// The open "new experiment" form, if any. Like the preview, it is modal.
     pub form: Option<ExperimentForm>,
+    /// The open "new plot" form, if any; modal as well.
+    pub plot_form: Option<PlotForm>,
     pub confirm: Option<Confirm>,
     /// `dvc` processes started outside dvcat that hold this project's lock (refreshed by [`App::tick`]).
     pub external: Vec<external::ExternalRun>,
@@ -384,6 +390,7 @@ impl App {
             plots: PlotsView::default(),
             focus: Focus::Stages,
             form: None,
+            plot_form: None,
             confirm: None,
             external: Vec::new(),
             external_checked: None,
@@ -549,6 +556,9 @@ impl App {
         }
         if self.form.is_some() {
             return self.on_form_key(key);
+        }
+        if self.plot_form.is_some() {
+            return self.on_plot_form_key(key);
         }
         if self.confirm.is_some() {
             return self.on_confirm_key(key.code);
@@ -730,11 +740,55 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => {
                 self.plots.selected = self.plots.selected.saturating_sub(1);
             }
+            KeyCode::Char('d') => self.plots.definition = !self.plots.definition,
+            KeyCode::Char('n') => self.plot_form = Some(PlotForm::default()),
             KeyCode::F(5) => self.load_plots(),
             KeyCode::Esc => self.view = View::Pipeline,
             _ => {}
         }
         Vec::new()
+    }
+
+    fn on_plot_form_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let Some(form) = &mut self.plot_form else {
+            return Vec::new();
+        };
+        match form.on_key(key) {
+            PlotFormAction::Continue => {}
+            PlotFormAction::Cancel => self.plot_form = None,
+            PlotFormAction::Submit(draft) => match self.add_plot(&draft) {
+                Ok(()) => {
+                    self.plot_form = None;
+                    self.notice = Some(format!("added plot {}", draft.file));
+                }
+                Err(message) => {
+                    if let Some(form) = &mut self.plot_form {
+                        form.error = Some(message);
+                    }
+                }
+            },
+        }
+        Vec::new()
+    }
+
+    /// Write the plot into `dvc.yaml`, read the plots again and select the new one.
+    fn add_plot(&mut self, draft: &plots::Draft) -> Result<(), String> {
+        if let Some(Ok(existing)) = &self.plots.data
+            && existing.iter().any(|plot| plot.id == draft.file)
+        {
+            return Err(format!("a plot named {} already exists", draft.file));
+        }
+        let path = self.project.root.join("dvc.yaml");
+        let text = fs::read_to_string(&path).map_err(|e| format!("cannot read dvc.yaml: {e}"))?;
+        let updated = plots::add_to_dvc_yaml(&text, draft)?;
+        fs::write(&path, updated).map_err(|e| format!("cannot write dvc.yaml: {e}"))?;
+        self.load_plots();
+        if let Some(Ok(list)) = &self.plots.data
+            && let Some(index) = list.iter().position(|plot| plot.id == draft.file)
+        {
+            self.plots.selected = index;
+        }
+        Ok(())
     }
 
     fn toggle_view(&mut self) -> Vec<Effect> {
@@ -3448,5 +3502,60 @@ mod dag_view_tests {
         press(&mut app, KeyCode::Char('p'));
         assert_eq!(app.view, View::Experiments);
         assert_ne!(app.experiments.plot, before);
+    }
+
+    #[test]
+    fn n_adds_a_plot_to_dvc_yaml_selects_it_and_closes_the_form() {
+        let (dir, mut app) = app_with_files(WITH_PLOTS);
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Char('n'));
+        assert!(app.plot_form.is_some());
+        // Digits typed into the form do not switch views.
+        for c in "loss.csv".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert!(app.plot_form.is_none());
+        assert_eq!(app.plots.selected, 2);
+        let yaml = std::fs::read_to_string(dir.path().join("dvc.yaml")).unwrap();
+        assert!(yaml.contains("  - loss.csv\n"), "{yaml}");
+        assert!(app.notice.as_deref().unwrap().contains("loss.csv"));
+    }
+
+    #[test]
+    fn a_duplicate_plot_is_refused_and_the_form_stays_open() {
+        let (dir, mut app) = app_with_files(WITH_PLOTS);
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Char('n'));
+        for c in "gone.csv".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let before = std::fs::read_to_string(dir.path().join("dvc.yaml")).unwrap();
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            app.plot_form
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("already")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dvc.yaml")).unwrap(),
+            before
+        );
+        press(&mut app, KeyCode::Esc);
+        assert!(app.plot_form.is_none());
+    }
+
+    #[test]
+    fn d_toggles_the_definition_panel() {
+        let (_dir, mut app) = app_with_files(WITH_PLOTS);
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(app.plots.definition);
+        press(&mut app, KeyCode::Char('d'));
+        assert!(!app.plots.definition);
     }
 }

@@ -176,7 +176,9 @@ MIT, see `LICENSE`.
 
 The plots view (`4` or `p`) draws the `plots:` section of `dvc.yaml` in the terminal, reading the data files from the
 workspace (CSV, TSV, JSON, YAML). Nothing is saved by dvcat: the definitions live in `dvc.yaml` and the data in your
-tracked files, as in DVC. `j`/`k` pick a plot, `F5` re-reads the files.
+tracked files, as in DVC. `j`/`k` pick a plot, `F5` re-reads the files, `d` shows the selected plot's definition
+from `dvc.yaml` under the chart, and `n` opens a form (data file, x, y, template, title; it lists the file's columns)
+that adds a new plot to the `plots:` section of `dvc.yaml`, leaving the rest of the file untouched.
 
 Supported: `x`, `y` (a field, a list, or `file: fields`), `title`, `x_label`, `y_label` and the templates `linear`,
 `simple`, `scatter`, `smooth` (drawn as a plain line), `bar_horizontal`, `bar_horizontal_sorted`, `confusion` and

@@ -1,17 +1,20 @@
 //! The plots view: the plots from `dvc.yaml`, listed on the left and drawn on the right.
 
+use std::path::Path;
+
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     symbols::Marker,
     text::{Line, Span},
-    widgets::{Axis, Chart, Dataset, GraphType, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Axis, Chart, Clear, Dataset, GraphType, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::{
     app::App,
-    plots::{Content, Plot, Series, Template},
+    plot_form::{FIELDS, PlotForm},
+    plots::{self, Content, Plot, Series, Template},
     theme,
 };
 
@@ -73,7 +76,17 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(list, list_area, &mut state);
 
     if let Some(plot) = plots.get(app.plots.selected) {
-        render_plot(plot, frame, plot_area);
+        if app.plots.definition {
+            // The definition needs its lines plus the border; the chart keeps the rest.
+            let wanted = plot.definition.lines().count() as u16 + 2;
+            let height = wanted.min(plot_area.height / 2).max(3);
+            let [chart_area, definition_area] =
+                Layout::vertical([Constraint::Min(3), Constraint::Length(height)]).areas(plot_area);
+            render_plot(plot, frame, chart_area);
+            render_definition(plot, frame, definition_area);
+        } else {
+            render_plot(plot, frame, plot_area);
+        }
     }
 }
 
@@ -225,4 +238,94 @@ fn render_matrix(
         lines.push(Line::from(spans));
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_definition(plot: &Plot, frame: &mut Frame, area: Rect) {
+    let block = super::pane("Definition in dvc.yaml", false);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let lines: Vec<Line> = plot
+        .definition
+        .lines()
+        .map(|line| match line.split_once(':') {
+            Some((key, value)) if !key.trim_start_matches([' ', '-']).is_empty() => {
+                Line::from(vec![
+                    Span::styled(format!("{key}:"), Style::new().fg(theme::PEACH)),
+                    Span::styled(value.to_owned(), Style::new().fg(theme::TEXT)),
+                ])
+            }
+            _ => Line::styled(line.to_owned(), Style::new().fg(theme::TEXT)),
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The "new plot" form in the middle of the screen: a line per field, then a hint or the error.
+pub fn render_form(form: &PlotForm, root: &Path, frame: &mut Frame, area: Rect) {
+    let width = (area.width * 80 / 100).max(40).min(area.width);
+    let height = (FIELDS.len() as u16 + 4).min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let block = super::pane("New plot · added to dvc.yaml", true)
+        .border_style(Style::new().fg(theme::MAUVE));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let [rows_area, status_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner);
+
+    let label_width = FIELDS
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0);
+    let lines: Vec<Line> = FIELDS
+        .iter()
+        .enumerate()
+        .map(|(index, (label, _))| {
+            let active = index == form.active;
+            let mut spans = vec![
+                Span::styled(
+                    if active { "▌ " } else { "  " },
+                    Style::new().fg(theme::MAUVE),
+                ),
+                Span::styled(format!("{label:<label_width$}  "), theme::label()),
+                Span::styled(form.values[index].clone(), Style::new().fg(theme::TEXT)),
+            ];
+            if active {
+                spans.push(Span::styled("▏", Style::new().fg(theme::MAUVE)));
+            }
+            let line = Line::from(spans);
+            if active {
+                line.style(theme::selected())
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), rows_area);
+
+    let hint = FIELDS[form.active].1;
+    let status = if let Some(error) = &form.error {
+        Line::styled(format!("⚠ {error}"), Style::new().fg(theme::RED))
+    } else if form.file().is_empty() {
+        Line::styled(hint, theme::muted())
+    } else {
+        match plots::columns(root, form.file()) {
+            Ok(columns) => Line::styled(
+                format!("columns: {}", columns.join(", ")),
+                Style::new().fg(theme::TEAL),
+            ),
+            Err(reason) => Line::styled(
+                format!("{reason} (the plot is added anyway)"),
+                Style::new().fg(theme::YELLOW),
+            ),
+        }
+    };
+    let second = Line::styled(hint, theme::muted().add_modifier(Modifier::ITALIC));
+    frame.render_widget(Paragraph::new(vec![status, second]), status_area);
 }

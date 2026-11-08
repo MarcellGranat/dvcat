@@ -12,6 +12,8 @@ const DVC_YAML: &str = "dvc.yaml";
 /// The implicit X field DVC uses when none is given: the row number.
 pub const STEP: &str = "step";
 const DEFAULT_TEMPLATE: &str = "linear";
+/// Every template name `dvc plots` knows, for the form's hint.
+pub const TEMPLATES: &str = "linear, simple, scatter, smooth, bar_horizontal, bar_horizontal_sorted, confusion, confusion_normalized";
 
 /// How a plot is drawn, after DVC's built-in templates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +34,7 @@ pub enum Template {
 }
 
 impl Template {
-    fn parse(name: &str) -> Option<Self> {
+    pub fn parse(name: &str) -> Option<Self> {
         match name.trim_end_matches(".json") {
             "linear" | "simple" => Some(Self::Line),
             "smooth" => Some(Self::Smooth),
@@ -75,6 +77,8 @@ pub struct Plot {
     pub x_title: String,
     pub y_title: String,
     pub content: Content,
+    /// The entry as it is written in `dvc.yaml`, under its `plots:` key.
+    pub definition: String,
 }
 
 /// Where one plot's data comes from, as written in `dvc.yaml`.
@@ -88,6 +92,7 @@ struct Spec {
     title: Option<String>,
     x_label: Option<String>,
     y_label: Option<String>,
+    definition: String,
 }
 
 /// Load every plot of the project at `root`. A project without a `plots:` section has none.
@@ -118,7 +123,23 @@ fn parse_specs(text: &str) -> Result<Vec<Spec>, String> {
         Yaml::Null => Vec::new(),
         _ => return Err("'plots' in dvc.yaml must be a list".to_owned()),
     };
-    entries.iter().map(parse_spec).collect()
+    entries
+        .iter()
+        .map(|entry| {
+            let mut spec = parse_spec(entry)?;
+            spec.definition = definition_text(entry);
+            Ok(spec)
+        })
+        .collect()
+}
+
+fn definition_text(entry: &Yaml) -> String {
+    let mut wrapper = serde_norway::Mapping::new();
+    wrapper.insert(
+        Yaml::String("plots".to_owned()),
+        Yaml::Sequence(vec![entry.clone()]),
+    );
+    serde_norway::to_string(&Yaml::Mapping(wrapper)).unwrap_or_default()
 }
 
 /// A field name or a list of them.
@@ -316,6 +337,7 @@ fn build(root: &Path, spec: &Spec) -> Plot {
             .unwrap_or_else(|| STEP.to_owned()),
         y_title: String::new(),
         content: Content::Unavailable(String::new()),
+        definition: spec.definition.clone(),
     };
     if template.is_none() {
         plot.content = Content::Unavailable(format!("unknown template '{template_name}'"));
@@ -537,6 +559,117 @@ fn matrix(
     Ok(Content::Matrix { labels, counts })
 }
 
+// ---------------------------------------------------------------------------------------------
+// Adding a plot
+// ---------------------------------------------------------------------------------------------
+
+/// What the "new plot" form collects.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Draft {
+    pub file: String,
+    pub x: String,
+    pub y: Vec<String>,
+    pub template: String,
+    pub title: String,
+}
+
+/// Quote a YAML scalar only when it needs it.
+fn scalar(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text == text.trim()
+        && !text.starts_with([
+            '-', '?', '!', '&', '*', '|', '>', '%', '@', '`', '\'', '"', '#', '[', '{',
+        ])
+        && !text.contains([':', '#', ',', ']', '}'])
+        && !matches!(text, "true" | "false" | "null" | "yes" | "no" | "~");
+    if plain {
+        text.to_owned()
+    } else {
+        format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+impl Draft {
+    /// The list item for `dvc.yaml`, its dash indented by `indent` spaces. Fields left empty are
+    /// not written, so DVC's defaults apply.
+    pub fn entry(&self, indent: usize) -> String {
+        let pad = " ".repeat(indent);
+        let file = scalar(&self.file);
+        let mut fields: Vec<String> = Vec::new();
+        if !self.x.is_empty() {
+            fields.push(format!("x: {}", scalar(&self.x)));
+        }
+        match self.y.as_slice() {
+            [] => {}
+            [one] => fields.push(format!("y: {}", scalar(one))),
+            many => fields.push(format!(
+                "y: [{}]",
+                many.iter()
+                    .map(|y| scalar(y))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+        if !self.template.is_empty() && self.template != DEFAULT_TEMPLATE {
+            fields.push(format!("template: {}", scalar(&self.template)));
+        }
+        if !self.title.is_empty() {
+            fields.push(format!("title: {}", scalar(&self.title)));
+        }
+        if fields.is_empty() {
+            return format!("{pad}- {file}\n");
+        }
+        let mut text = format!("{pad}- {file}:\n");
+        for field in fields {
+            text.push_str(&format!("{pad}    {field}\n"));
+        }
+        text
+    }
+}
+
+/// `dvc.yaml` with the plot added to its `plots:` section (created at the end when missing).
+/// The rest of the file, comments included, is left as it was.
+pub fn add_to_dvc_yaml(text: &str, draft: &Draft) -> Result<String, String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(start) = lines
+        .iter()
+        .position(|l| l.trim_end() == "plots:" || l.starts_with("plots:"))
+    else {
+        let mut out = text.to_owned();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("plots:\n");
+        out.push_str(&draft.entry(2));
+        return Ok(out);
+    };
+    if lines[start].trim_end() != "plots:" {
+        return Err("`plots:` in dvc.yaml is written on one line; edit it by hand".to_owned());
+    }
+    // The section runs while lines are indented, list items, comments or blank.
+    let belongs = |l: &&&str| l.trim().is_empty() || l.starts_with([' ', '\t', '-', '#']);
+    let end = lines[start + 1..].iter().take_while(belongs).count() + start + 1;
+    // Insert after the last real line, so blank lines before the next key stay where they are.
+    let at = (start + 1..end)
+        .rev()
+        .find(|&i| !lines[i].trim().is_empty() && !lines[i].starts_with('#'))
+        .map_or(start + 1, |i| i + 1);
+    let indent = lines[start + 1..end]
+        .iter()
+        .find(|l| l.trim_start().starts_with("- "))
+        .map_or(2, |l| l.len() - l.trim_start().len());
+    let mut out: Vec<String> = lines.iter().map(|l| (*l).to_owned()).collect();
+    for (offset, line) in draft.entry(indent).lines().enumerate() {
+        out.insert(at + offset, line.to_owned());
+    }
+    Ok(out.join("\n") + "\n")
+}
+
+/// The column names of a data file, for the form's hint.
+pub fn columns(root: &Path, file: &str) -> Result<Vec<String>, String> {
+    read_records(root, file).map(|r| r.columns)
+}
+
 impl Plot {
     /// Ranges `(x_min, x_max, y_min, y_max)` of a line plot, padded so lines never sit on the frame.
     pub fn bounds(series: &[Series]) -> (f64, f64, f64, f64) {
@@ -705,6 +838,81 @@ mod tests {
     fn quoted_cells_may_hold_the_delimiter() {
         let records = parse_delimited("a,b\n\"x,y\",\"say \"\"hi\"\"\"\n", ',');
         assert_eq!(records.rows, [["x,y", "say \"hi\""]]);
+    }
+
+    #[test]
+    fn a_plot_remembers_its_definition_as_written_in_dvc_yaml() {
+        let dir = project(
+            "plots:\n  - acc.csv:\n      x: epoch\n",
+            &[("acc.csv", "epoch,acc\n1,2\n")],
+        );
+        let plot = &load(dir.path()).unwrap()[0];
+        assert!(
+            plot.definition.starts_with("plots:\n"),
+            "{}",
+            plot.definition
+        );
+        assert!(
+            plot.definition.contains("acc.csv:") && plot.definition.contains("x: epoch"),
+            "{}",
+            plot.definition
+        );
+    }
+
+    fn draft(file: &str) -> Draft {
+        Draft {
+            file: file.into(),
+            ..Draft::default()
+        }
+    }
+
+    #[test]
+    fn a_bare_draft_is_a_plain_path_and_options_make_a_mapping() {
+        assert_eq!(draft("a.csv").entry(2), "  - a.csv\n");
+        let full = Draft {
+            file: "a.csv".into(),
+            x: "epoch".into(),
+            y: vec!["loss".into(), "val loss".into()],
+            template: "scatter".into(),
+            title: "Run: 1".into(),
+        };
+        assert_eq!(
+            full.entry(2),
+            "  - a.csv:\n      x: epoch\n      y: [loss, val loss]\n      template: scatter\n      title: \"Run: 1\"\n"
+        );
+    }
+
+    #[test]
+    fn adding_creates_the_section_when_it_is_missing() {
+        let out = add_to_dvc_yaml("stages: {}", &draft("a.csv")).unwrap();
+        assert_eq!(out, "stages: {}\nplots:\n  - a.csv\n");
+    }
+
+    #[test]
+    fn adding_appends_to_the_section_and_leaves_the_rest_alone() {
+        let text = "plots:\n  # curves\n  - a.csv:\n      x: step\n\nstages:\n  s:\n    cmd: x\n";
+        let out = add_to_dvc_yaml(text, &draft("b.csv")).unwrap();
+        assert_eq!(
+            out,
+            "plots:\n  # curves\n  - a.csv:\n      x: step\n  - b.csv\n\nstages:\n  s:\n    cmd: x\n"
+        );
+        // Still valid, and the new plot is listed after the old one.
+        let specs = parse_specs(&out).unwrap();
+        assert_eq!(
+            specs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["a.csv", "b.csv"]
+        );
+    }
+
+    #[test]
+    fn adding_follows_the_indent_of_a_section_written_without_one() {
+        let out = add_to_dvc_yaml("plots:\n- a.csv\n", &draft("b.csv")).unwrap();
+        assert_eq!(out, "plots:\n- a.csv\n- b.csv\n");
+    }
+
+    #[test]
+    fn an_inline_section_is_refused_not_mangled() {
+        assert!(add_to_dvc_yaml("plots: []\n", &draft("b.csv")).is_err());
     }
 
     #[test]
