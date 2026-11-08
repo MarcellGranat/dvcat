@@ -22,7 +22,7 @@ use ratatui::{
 };
 
 use dvcat::{
-    app::{App, Event},
+    app::{App, Event, PickRequest},
     cli, graph,
     project::Project,
     ui,
@@ -90,9 +90,9 @@ fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<Option<String>> {
             let result = open_in_editor(terminal, &paused, &path);
             app.editor_closed(result.err(), &tx);
         }
-        if let Some(files) = app.pick_request.take() {
-            let result = pick_with_fzf(terminal, &paused, &files);
-            app.file_picked(result);
+        if let Some(request) = app.pick_request.take() {
+            let result = pick_with_fzf(terminal, &paused, &request);
+            app.file_picked(request.target, result);
         }
     }
     // A run keeps going without us; tell the user once the terminal is back to normal.
@@ -131,25 +131,33 @@ fn open_in_editor(
     }
 }
 
-/// Give the terminal to `fzf` over `files`, then take it back. `Ok(None)` when nothing was chosen.
+/// Give the terminal to `fzf` over the request's items, then take it back. An empty list means
+/// nothing was chosen.
 fn pick_with_fzf(
     terminal: &mut DefaultTerminal,
     paused: &AtomicBool,
-    files: &[String],
-) -> Result<Option<String>, String> {
+    request: &PickRequest,
+) -> Result<Vec<String>, String> {
     paused.store(true, Ordering::SeqCst);
     thread::sleep(KEY_POLL * 2);
     ratatui::restore();
     // fzf draws on the terminal itself; only its answer comes back through the pipe.
-    let spawned = Command::new("fzf")
-        .args(["--prompt", "plot data > ", "--height", "40%", "--reverse"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn();
+    let mut command = Command::new("fzf");
+    command.args([
+        "--prompt",
+        &format!("{} > ", request.prompt),
+        "--height",
+        "40%",
+        "--reverse",
+    ]);
+    if request.multi {
+        command.arg("--multi");
+    }
+    let spawned = command.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn();
     let result = match spawned {
         Ok(mut child) => {
             if let Some(mut stdin) = child.stdin.take() {
-                let list = files.join("\n");
+                let list = request.items.join("\n");
                 // A thread, so a long list cannot fill the pipe while fzf waits for us to read.
                 thread::spawn(move || {
                     let _ = stdin.write_all(list.as_bytes());
@@ -159,9 +167,16 @@ fn pick_with_fzf(
                 .wait_with_output()
                 .map_err(|error| format!("fzf failed: {error}"))
                 .map(|output| {
-                    let chosen = String::from_utf8_lossy(&output.stdout).trim().to_owned();
                     // Esc and Ctrl+C make fzf exit non-zero with nothing on stdout.
-                    (output.status.success() && !chosen.is_empty()).then_some(chosen)
+                    if !output.status.success() {
+                        return Vec::new();
+                    }
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .map(str::to_owned)
+                        .collect()
                 })
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

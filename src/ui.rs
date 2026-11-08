@@ -13,6 +13,7 @@ use ratatui::{
 mod dag;
 mod experiments;
 mod plots;
+mod stage_form;
 
 use crate::{
     app::{App, Confirm, Focus, Run, RunPhase, View},
@@ -36,6 +37,7 @@ const PIPELINE_KEYS: &[(&str, &str)] = &[
     ("Tab", "files"),
     ("r", "run"),
     ("R", "run+upstream"),
+    ("n", "new stage"),
     ("x", "cancel"),
     ("PgUp/PgDn", "log"),
     ("g", "graph"),
@@ -73,6 +75,13 @@ const PLOT_FORM_KEYS: &[(&str, &str)] = &[
     ("Enter", "add to dvc.yaml"),
     ("Esc", "cancel"),
 ];
+const STAGE_FORM_KEYS: &[(&str, &str)] = &[
+    ("Tab", "next field"),
+    ("Space", "toggle"),
+    ("Ctrl+F", "pick (fzf)"),
+    ("Enter", "add to dvc.yaml"),
+    ("Esc", "cancel"),
+];
 const PROMPT_KEYS: &[(&str, &str)] = &[
     ("type", "edit"),
     ("Ctrl+U", "clear"),
@@ -90,6 +99,7 @@ const DAG_KEYS: &[(&str, &str)] = &[
     ("h/l", "upstream/downstream"),
     ("j/k", "same layer"),
     ("Enter", "open stage"),
+    ("n", "new stage"),
     ("r", "run"),
     ("R", "run+upstream"),
     ("x", "cancel"),
@@ -184,6 +194,14 @@ pub fn view(app: &App, frame: &mut Frame) {
         Some(form) => {
             render_form(form, frame, main);
             FORM_KEYS
+        }
+        None => keys,
+    };
+
+    let keys = match &app.stage_form {
+        Some(form) => {
+            stage_form::render(form, frame, main);
+            STAGE_FORM_KEYS
         }
         None => keys,
     };
@@ -1910,6 +1928,29 @@ mod tests {
         let text = render(&app, 100, 28).join("\n");
         assert!(
             text.contains("New plot") && text.contains("columns: epoch, acc"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_stage_form_shows_fields_toggles_and_the_hint_of_the_active_one() {
+        let mut app = demo_app();
+        app.stage_form = Some(crate::stage_form::StageForm::default());
+        let text = render(&app, 110, 28).join("\n");
+        assert!(
+            text.contains("New stage") && text.contains("cmd") && text.contains("metrics"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[x] cache") && text.contains("[ ] persist"),
+            "{text}"
+        );
+        assert!(text.contains("stage name"), "{text}");
+        app.stage_form.as_mut().unwrap().active = 7;
+        app.stage_form.as_mut().unwrap().flags[1] = true;
+        let text = render(&app, 110, 28).join("\n");
+        assert!(
+            text.contains("[x] persist") && text.contains("do not delete the outputs"),
             "{text}"
         );
     }

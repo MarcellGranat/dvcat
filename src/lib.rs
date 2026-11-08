@@ -3,6 +3,7 @@
 pub mod app;
 pub mod cli;
 pub mod dag;
+pub mod dvc_yaml;
 pub mod expand;
 pub mod experiments;
 pub mod external;
@@ -18,6 +19,7 @@ pub mod plots;
 pub mod project;
 pub mod prompt;
 pub mod runner;
+pub mod stage_form;
 pub mod stale;
 pub mod theme;
 pub mod ui;

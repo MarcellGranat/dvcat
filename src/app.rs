@@ -13,19 +13,21 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
     dag::{self, Layout, Move},
+    dvc_yaml,
     experiments::{self, RowKind, Sort, Table},
     external,
     files::{self, FileEntry, Preview},
     form::{ExperimentForm, FormAction},
-    graph::Graph,
+    graph::{self, Graph},
     history::{self, History, StoredOutcome, StoredRun},
     log::LogBuffer,
     params_filter::{ParamPicker, PickerAction},
     plot_form::{PlotForm, PlotFormAction},
     plots::{self, Plot},
-    project::{Project, Stage},
+    project::{self, DEFAULT_PARAMS_FILE, Project, Stage},
     prompt::{Prompt, PromptAction},
     runner::{self, Attached, DvcNotFound, KILL_GRACE, RunOutcome, RunRecord, RunningJob},
+    stage_form::{self, Pick, StageForm, StageFormAction},
     stale::{self, StageStatus},
 };
 
@@ -113,6 +115,23 @@ pub enum View {
     Dag,
     /// The plots defined in `dvc.yaml`, drawn from their data files.
     Plots,
+}
+
+/// Which form field a pick from `fzf` is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickTarget {
+    PlotFile,
+    Stage(Pick),
+}
+
+/// A list of paths (or param keys) for `fzf` to choose from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickRequest {
+    pub items: Vec<String>,
+    /// Several items may be chosen (Tab in `fzf`).
+    pub multi: bool,
+    pub prompt: String,
+    pub target: PickTarget,
 }
 
 /// Everything the plots view needs to remember.
@@ -350,6 +369,8 @@ pub struct App {
     pub form: Option<ExperimentForm>,
     /// The open "new plot" form, if any; modal as well.
     pub plot_form: Option<PlotForm>,
+    /// The open "new stage" form, if any; modal as well.
+    pub stage_form: Option<StageForm>,
     pub confirm: Option<Confirm>,
     /// `dvc` processes started outside dvcat that hold this project's lock (refreshed by [`App::tick`]).
     pub external: Vec<external::ExternalRun>,
@@ -371,7 +392,7 @@ pub struct App {
     pub editor_request: Option<PathBuf>,
     /// Set when the new-plot form wants a file chosen; `main` takes it, suspends the UI and runs
     /// `fzf` over these paths, then reports the choice to [`App::file_picked`].
-    pub pick_request: Option<Vec<String>>,
+    pub pick_request: Option<PickRequest>,
     /// A one-line message for the footer; cleared by the next key press.
     pub notice: Option<String>,
     /// How to find `dvc`. A plain function pointer so tests can substitute their own.
@@ -396,6 +417,7 @@ impl App {
             focus: Focus::Stages,
             form: None,
             plot_form: None,
+            stage_form: None,
             confirm: None,
             external: Vec::new(),
             external_checked: None,
@@ -566,6 +588,9 @@ impl App {
         if self.plot_form.is_some() {
             return self.on_plot_form_key(key);
         }
+        if self.stage_form.is_some() {
+            return self.on_stage_form_key(key);
+        }
         if self.confirm.is_some() {
             return self.on_confirm_key(key.code);
         }
@@ -643,6 +668,7 @@ impl App {
             KeyCode::Char('R') => return self.request_run(true),
             KeyCode::PageUp => self.scroll_log_back(),
             KeyCode::PageDown => self.scroll_log_forward(),
+            KeyCode::Char('n') => self.stage_form = Some(StageForm::default()),
             _ => {}
         }
         Vec::new()
@@ -711,11 +737,132 @@ impl App {
         match code {
             // The graph view shares the selection with the pipeline view, so Enter just goes there.
             KeyCode::Enter | KeyCode::Esc => self.view = View::Pipeline,
+            KeyCode::Char('n') => self.stage_form = Some(StageForm::default()),
             KeyCode::Char('r') => return self.request_run(false),
             KeyCode::Char('R') => return self.request_run(true),
             _ => {}
         }
         Vec::new()
+    }
+
+    fn on_stage_form_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let Some(form) = &mut self.stage_form else {
+            return Vec::new();
+        };
+        match form.on_key(key) {
+            StageFormAction::Continue => {}
+            StageFormAction::Cancel => self.stage_form = None,
+            StageFormAction::Pick(pick) => {
+                let items = self.pick_candidates(pick);
+                if let Some(form) = &mut self.stage_form {
+                    if items.is_empty() {
+                        form.error = Some("nothing to pick from".to_owned());
+                    } else {
+                        self.pick_request = Some(PickRequest {
+                            items,
+                            multi: true,
+                            prompt: format!("{pick:?} (Tab: several)").to_lowercase(),
+                            target: PickTarget::Stage(pick),
+                        });
+                    }
+                }
+            }
+            StageFormAction::Submit(draft) => match self.add_stage(&draft) {
+                Ok(()) => {
+                    self.stage_form = None;
+                    self.notice = Some(format!("added stage {}", draft.name));
+                    return vec![Effect::RefreshStatuses];
+                }
+                Err(message) => {
+                    if let Some(form) = &mut self.stage_form {
+                        form.error = Some(message);
+                    }
+                }
+            },
+        }
+        Vec::new()
+    }
+
+    /// What `fzf` offers for a list field of the stage form.
+    fn pick_candidates(&self, pick: Pick) -> Vec<String> {
+        match pick {
+            Pick::Params => self.param_candidates(),
+            Pick::Deps | Pick::Outs | Pick::Metrics => {
+                dvc_yaml::iter_files(&self.project.root, |name, _| {
+                    name != "dvc.lock" && !name.ends_with(".pyc")
+                })
+                .take(MAX_PICK_FILES)
+                .collect()
+            }
+        }
+    }
+
+    /// Every param key of `params.yaml` and of the other param files the stages use: a plain key
+    /// for the default file, `file:key` for the rest.
+    fn param_candidates(&self) -> Vec<String> {
+        let mut files: Vec<&str> = vec![DEFAULT_PARAMS_FILE];
+        files.extend(
+            self.project
+                .params
+                .keys()
+                .map(String::as_str)
+                .filter(|file| *file != DEFAULT_PARAMS_FILE),
+        );
+        let mut keys = Vec::new();
+        for file in files {
+            let Ok(tree) = project::load_param_file(&self.project.root, file) else {
+                continue;
+            };
+            for (key, _) in project::flatten_leaves("", &tree) {
+                let key = key.trim_start_matches('.');
+                keys.push(if file == DEFAULT_PARAMS_FILE {
+                    key.to_owned()
+                } else {
+                    format!("{file}:{key}")
+                });
+            }
+        }
+        keys
+    }
+
+    /// Write the stage into `dvc.yaml` and load the stages again. Nothing is written when the
+    /// result would not parse or would make a dependency cycle.
+    fn add_stage(&mut self, draft: &stage_form::StageDraft) -> Result<(), String> {
+        if self
+            .project
+            .stages
+            .iter()
+            .any(|stage| stage.name == draft.name)
+        {
+            return Err(format!("a stage named {} already exists", draft.name));
+        }
+        let root = self.project.root.clone();
+        let path = root.join("dvc.yaml");
+        let text = fs::read_to_string(&path).map_err(|e| format!("cannot read dvc.yaml: {e}"))?;
+        let updated = stage_form::add_to_dvc_yaml(&text, draft)?;
+        let stages =
+            project::parse_dvc_yaml_in(&updated, Some(&root)).map_err(|e| format!("{e:#}"))?;
+        graph::build(&stages).map_err(|e| e.to_string())?;
+        fs::write(&path, updated).map_err(|e| format!("cannot write dvc.yaml: {e}"))?;
+        self.reload_stages(&draft.name)
+    }
+
+    /// Read `dvc.yaml` again, rebuild the graph and select `name`. Stale statuses are dropped:
+    /// the caller starts a new check.
+    fn reload_stages(&mut self, name: &str) -> Result<(), String> {
+        let project = Project::load(&self.project.root).map_err(|e| format!("{e:#}"))?;
+        let graph = graph::build(&project.stages).map_err(|e| e.to_string())?;
+        let names: Vec<&str> = project.stages.iter().map(|s| s.name.as_str()).collect();
+        self.dag = dag::layout(&names, &graph);
+        let index = project.stages.iter().position(|s| s.name == name);
+        self.selected = index
+            .and_then(|i| graph.order.iter().position(|&o| o == i))
+            .unwrap_or(0);
+        self.file_cursor = 0;
+        self.statuses = None;
+        self.project = project;
+        self.graph = graph;
+        Ok(())
     }
 
     fn open_plots(&mut self) -> Vec<Effect> {
@@ -769,7 +916,12 @@ impl App {
                 if files.is_empty() {
                     form.error = Some("no csv, tsv, json or yaml files in the project".to_owned());
                 } else {
-                    self.pick_request = Some(files);
+                    self.pick_request = Some(PickRequest {
+                        items: files,
+                        multi: false,
+                        prompt: "plot data".to_owned(),
+                        target: PickTarget::PlotFile,
+                    });
                 }
             }
             PlotFormAction::Submit(draft) => match self.add_plot(&draft) {
@@ -1385,15 +1537,29 @@ impl App {
         }
     }
 
-    /// `fzf` has exited: `Ok(None)` means nothing was chosen. A choice goes into the form's file field.
-    pub fn file_picked(&mut self, result: Result<Option<String>, String>) {
-        let Some(form) = &mut self.plot_form else {
-            return;
+    /// `fzf` has exited: an empty list means nothing was chosen. A choice goes into the form
+    /// field the pick was for.
+    pub fn file_picked(&mut self, target: PickTarget, result: Result<Vec<String>, String>) {
+        let error = match (target, result) {
+            (_, Ok(chosen)) if chosen.is_empty() => return,
+            (PickTarget::PlotFile, Ok(chosen)) => {
+                if let (Some(form), Some(file)) = (&mut self.plot_form, chosen.first()) {
+                    form.set_file(file);
+                }
+                return;
+            }
+            (PickTarget::Stage(pick), Ok(chosen)) => {
+                if let Some(form) = &mut self.stage_form {
+                    form.add_picked(pick, &chosen);
+                }
+                return;
+            }
+            (_, Err(message)) => message,
         };
-        match result {
-            Ok(Some(file)) => form.set_file(&file),
-            Ok(None) => {}
-            Err(message) => form.error = Some(message),
+        if let Some(form) = &mut self.plot_form {
+            form.error = Some(error);
+        } else if let Some(form) = &mut self.stage_form {
+            form.error = Some(error);
         }
     }
 
@@ -3596,13 +3762,136 @@ mod dag_view_tests {
             KeyCode::Char('f'),
             KeyModifiers::CONTROL,
         )));
-        assert_eq!(app.pick_request.take().unwrap(), ["acc.csv"]);
-        app.file_picked(Ok(Some("acc.csv".to_owned())));
+        let request = app.pick_request.take().unwrap();
+        assert_eq!(request.items, ["acc.csv"]);
+        assert!(!request.multi);
+        assert_eq!(request.target, PickTarget::PlotFile);
+        app.file_picked(PickTarget::PlotFile, Ok(vec!["acc.csv".to_owned()]));
         assert_eq!(app.plot_form.as_ref().unwrap().file(), "acc.csv");
-        app.file_picked(Err("fzf not found".to_owned()));
+        app.file_picked(PickTarget::PlotFile, Ok(Vec::new()));
+        assert_eq!(app.plot_form.as_ref().unwrap().file(), "acc.csv");
+        app.file_picked(PickTarget::PlotFile, Err("fzf not found".to_owned()));
         assert_eq!(
             app.plot_form.as_ref().unwrap().error.as_deref(),
             Some("fzf not found")
         );
+    }
+
+    const CHAIN: &[(&str, &str)] = &[
+        (
+            "dvc.yaml",
+            "stages:\n  a:\n    cmd: x\n    deps: [c.txt]\n    outs: [a.txt]\n  b:\n    cmd: y\n    deps: [a.txt]\n    outs: [b.txt]\n",
+        ),
+        ("params.yaml", "train:\n  lr: 0.1\n  epochs: 3\n"),
+        ("data.csv", "x\n1\n"),
+    ];
+
+    fn type_into(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn n_adds_a_stage_to_dvc_yaml_selects_it_and_asks_for_new_statuses() {
+        let (dir, mut app) = app_with_files(CHAIN);
+        press(&mut app, KeyCode::Char('n'));
+        assert!(app.stage_form.is_some());
+        type_into(&mut app, "train");
+        press(&mut app, KeyCode::Tab);
+        type_into(&mut app, "python train.py");
+        let effects = app.update(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(effects, [Effect::RefreshStatuses]);
+        assert!(app.stage_form.is_none());
+        assert_eq!(app.project.stages.len(), 3);
+        assert_eq!(app.project.stages[2].name, "train");
+        let selected = app.graph.order[app.selected];
+        assert_eq!(app.project.stages[selected].name, "train");
+        assert!(app.statuses.is_none());
+        let yaml = std::fs::read_to_string(dir.path().join("dvc.yaml")).unwrap();
+        assert!(
+            yaml.ends_with("  train:\n    cmd: python train.py\n"),
+            "{yaml}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_stage_or_a_cycle_is_refused_and_dvc_yaml_is_left_alone() {
+        let (dir, mut app) = app_with_files(CHAIN);
+        let before = std::fs::read_to_string(dir.path().join("dvc.yaml")).unwrap();
+        let try_stage = |app: &mut App, name: &str, deps: &str, outs: &str| {
+            press(app, KeyCode::Char('n'));
+            type_into(app, name);
+            press(app, KeyCode::Tab);
+            type_into(app, "cmd");
+            press(app, KeyCode::Tab);
+            type_into(app, deps);
+            press(app, KeyCode::Tab);
+            press(app, KeyCode::Tab);
+            type_into(app, outs);
+            press(app, KeyCode::Enter);
+        };
+        try_stage(&mut app, "a", "", "");
+        assert!(
+            app.stage_form
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("already")
+        );
+        press(&mut app, KeyCode::Esc);
+        try_stage(&mut app, "c", "b.txt", "c.txt");
+        assert!(
+            app.stage_form
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("cycle")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dvc.yaml")).unwrap(),
+            before
+        );
+        assert_eq!(app.project.stages.len(), 2);
+    }
+
+    #[test]
+    fn ctrl_f_in_the_stage_form_offers_files_or_param_keys_and_adds_the_picks() {
+        let (_dir, mut app) = app_with_files(CHAIN);
+        press(&mut app, KeyCode::Char('n'));
+        let ctrl_f = || Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        app.stage_form.as_mut().unwrap().active = 2; // deps
+        app.update(ctrl_f());
+        let request = app.pick_request.take().unwrap();
+        assert!(request.multi);
+        assert_eq!(request.target, PickTarget::Stage(Pick::Deps));
+        assert!(
+            request.items.contains(&"data.csv".to_owned())
+                && !request.items.contains(&"dvc.lock".to_owned())
+        );
+        app.file_picked(request.target, Ok(vec!["data.csv".to_owned()]));
+        assert_eq!(app.stage_form.as_ref().unwrap().texts[2], "data.csv");
+
+        app.stage_form.as_mut().unwrap().active = 3; // params
+        app.update(ctrl_f());
+        let request = app.pick_request.take().unwrap();
+        assert_eq!(request.items, ["train.epochs", "train.lr"]);
+        app.file_picked(request.target, Ok(vec!["train.lr".to_owned()]));
+        assert_eq!(app.stage_form.as_ref().unwrap().texts[3], "train.lr");
+    }
+
+    #[test]
+    fn n_also_opens_the_stage_form_from_the_graph_view() {
+        let (_dir, mut app) = app_with_files(CHAIN);
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('n'));
+        assert!(app.stage_form.is_some());
     }
 }

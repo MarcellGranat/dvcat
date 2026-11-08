@@ -50,6 +50,7 @@ If none is found, pressing `r` explains where it looked.
 | `Esc`      | close the preview; from the files pane back to the stages |
 | `g` / `G`  | *(preview)* top / bottom                 |
 | `q`        | quit; a running stage **keeps running** and is picked up again when you start `dvcat` in the project |
+| `n`        | *(pipeline, graph)* add a stage: a form for name, cmd, deps, params, outs and metrics, with `[x]` options for `cache`, `persist`, `always_changed` and `frozen` (`Space` toggles). `Ctrl+F` on a list field picks files, or param keys, with [`fzf`](https://github.com/junegunn/fzf). The stage is written to `dvc.yaml` (nothing else in the file changes) |
 | `r`        | run the selected stage only (`dvc repro --single-item`) |
 | `R`        | run it with stale upstream stages (`dvc repro`) |
 | `x`        | cancel the running stage (from either view) |

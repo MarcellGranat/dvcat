@@ -8,6 +8,8 @@ use std::{collections::BTreeMap, fs, path::Path};
 use serde_json::Value as Json;
 use serde_norway::Value as Yaml;
 
+use crate::dvc_yaml::{self, scalar};
+
 const DVC_YAML: &str = "dvc.yaml";
 /// The implicit X field DVC uses when none is given: the row number.
 pub const STEP: &str = "step";
@@ -573,22 +575,6 @@ pub struct Draft {
     pub title: String,
 }
 
-/// Quote a YAML scalar only when it needs it.
-fn scalar(text: &str) -> String {
-    let plain = !text.is_empty()
-        && text == text.trim()
-        && !text.starts_with([
-            '-', '?', '!', '&', '*', '|', '>', '%', '@', '`', '\'', '"', '#', '[', '{',
-        ])
-        && !text.contains([':', '#', ',', ']', '}'])
-        && !matches!(text, "true" | "false" | "null" | "yes" | "no" | "~");
-    if plain {
-        text.to_owned()
-    } else {
-        format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
-    }
-}
-
 impl Draft {
     /// The list item for `dvc.yaml`, its dash indented by `indent` spaces. Fields left empty are
     /// not written, so DVC's defaults apply.
@@ -630,85 +616,27 @@ impl Draft {
 /// `dvc.yaml` with the plot added to its `plots:` section (created at the end when missing).
 /// The rest of the file, comments included, is left as it was.
 pub fn add_to_dvc_yaml(text: &str, draft: &Draft) -> Result<String, String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let Some(start) = lines
-        .iter()
-        .position(|l| l.trim_end() == "plots:" || l.starts_with("plots:"))
-    else {
-        let mut out = text.to_owned();
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str("plots:\n");
-        out.push_str(&draft.entry(2));
-        return Ok(out);
-    };
-    if lines[start].trim_end() != "plots:" {
-        return Err("`plots:` in dvc.yaml is written on one line; edit it by hand".to_owned());
-    }
-    // The section runs while lines are indented, list items, comments or blank.
-    let belongs = |l: &&&str| l.trim().is_empty() || l.starts_with([' ', '\t', '-', '#']);
-    let end = lines[start + 1..].iter().take_while(belongs).count() + start + 1;
-    // Insert after the last real line, so blank lines before the next key stay where they are.
-    let at = (start + 1..end)
-        .rev()
-        .find(|&i| !lines[i].trim().is_empty() && !lines[i].starts_with('#'))
-        .map_or(start + 1, |i| i + 1);
-    let indent = lines[start + 1..end]
-        .iter()
-        .find(|l| l.trim_start().starts_with("- "))
-        .map_or(2, |l| l.len() - l.trim_start().len());
-    let mut out: Vec<String> = lines.iter().map(|l| (*l).to_owned()).collect();
-    for (offset, line) in draft.entry(indent).lines().enumerate() {
-        out.insert(at + offset, line.to_owned());
-    }
-    Ok(out.join("\n") + "\n")
+    dvc_yaml::insert_into_section(
+        text,
+        "plots",
+        |indent| draft.entry(indent),
+        |line| line.trim_start().starts_with("- "),
+    )
 }
 
-/// Directories never worth looking into for data files.
-const SKIPPED_DIRS: [&str; 4] = ["target", "node_modules", "__pycache__", "venv"];
 const DATA_EXTENSIONS: [&str; 5] = ["csv", "tsv", "json", "yaml", "yml"];
-const MAX_DEPTH: usize = 8;
 
 /// Data files a plot can read, as paths relative to `root`, in directory order. Hidden
 /// directories (`.git`, `.dvc`, `.venv`) and `dvc.yaml` are left out.
 pub fn iter_data_files(root: &Path) -> impl Iterator<Item = String> {
-    let mut pending = vec![(root.to_path_buf(), 0_usize)];
-    let mut found: Vec<String> = Vec::new();
-    while let Some((dir, depth)) = pending.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut entries: Vec<_> = entries.flatten().collect();
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let path = entry.path();
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_dir() {
-                if depth < MAX_DEPTH
-                    && !name.starts_with('.')
-                    && !SKIPPED_DIRS.contains(&name.as_str())
-                {
-                    pending.push((path, depth + 1));
-                }
-            } else if kind.is_file() && name != DVC_YAML {
-                let extension = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(str::to_ascii_lowercase);
-                if extension.is_some_and(|e| DATA_EXTENSIONS.contains(&e.as_str()))
-                    && let Ok(relative) = path.strip_prefix(root)
-                {
-                    found.push(relative.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
-    found.sort();
-    found.into_iter()
+    dvc_yaml::iter_files(root, |name, path| {
+        name != DVC_YAML
+            && path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase)
+                .is_some_and(|e| DATA_EXTENSIONS.contains(&e.as_str()))
+    })
 }
 
 /// The column names of a data file, for the form's hint.
