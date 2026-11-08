@@ -2,7 +2,7 @@
 //!
 //! Pure state and key handling, no drawing and no I/O, like [`crate::form`].
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
     form::edit_text,
@@ -38,6 +38,8 @@ pub struct PlotForm {
 pub enum PlotFormAction {
     Continue,
     Cancel,
+    /// Ctrl+F on the file field: the app lets the user pick a file with `fzf`.
+    PickFile,
     Submit(Draft),
 }
 
@@ -58,12 +60,20 @@ impl PlotForm {
         self.values[FILE].trim()
     }
 
+    pub fn set_file(&mut self, file: &str) {
+        self.values[FILE] = file.to_owned();
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) -> PlotFormAction {
         self.error = None;
         let count = self.values.len();
         match key.code {
             KeyCode::Esc => return PlotFormAction::Cancel,
             KeyCode::Enter => return self.submit(),
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.active = FILE;
+                return PlotFormAction::PickFile;
+            }
             KeyCode::Tab | KeyCode::Down => self.active = (self.active + 1) % count,
             KeyCode::BackTab | KeyCode::Up => self.active = (self.active + count - 1) % count,
             _ => {
@@ -168,5 +178,20 @@ mod tests {
             PlotForm::default().on_key(key(KeyCode::Esc)),
             PlotFormAction::Cancel
         );
+    }
+
+    #[test]
+    fn ctrl_f_asks_to_pick_a_file_and_the_pick_fills_the_field() {
+        let mut form = PlotForm {
+            active: Y,
+            ..PlotForm::default()
+        };
+        let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert_eq!(form.on_key(ctrl_f), PlotFormAction::PickFile);
+        assert_eq!(form.active, FILE);
+        form.set_file("metrics/acc.csv");
+        assert_eq!(form.file(), "metrics/acc.csv");
+        // Ctrl+F is not typed into the field.
+        assert_eq!(form.values[FILE], "metrics/acc.csv");
     }
 }

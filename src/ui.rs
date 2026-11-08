@@ -69,6 +69,7 @@ const FORM_KEYS: &[(&str, &str)] = &[
 const PLOT_FORM_KEYS: &[(&str, &str)] = &[
     ("Tab", "next field"),
     ("Shift+Tab", "previous"),
+    ("Ctrl+F", "pick file (fzf)"),
     ("Enter", "add to dvc.yaml"),
     ("Esc", "cancel"),
 ];

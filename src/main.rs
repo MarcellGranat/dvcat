@@ -1,7 +1,7 @@
 use std::{
-    io::stdout,
+    io::{Write, stdout},
     path::Path,
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -90,6 +90,10 @@ fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<Option<String>> {
             let result = open_in_editor(terminal, &paused, &path);
             app.editor_closed(result.err(), &tx);
         }
+        if let Some(files) = app.pick_request.take() {
+            let result = pick_with_fzf(terminal, &paused, &files);
+            app.file_picked(result);
+        }
     }
     // A run keeps going without us; tell the user once the terminal is back to normal.
     Ok(app.shutdown())
@@ -125,6 +129,51 @@ fn open_in_editor(
         Ok(status) => Err(format!("{program} exited with {status}")),
         Err(error) => Err(format!("cannot start '{program}': {error} (set $EDITOR)")),
     }
+}
+
+/// Give the terminal to `fzf` over `files`, then take it back. `Ok(None)` when nothing was chosen.
+fn pick_with_fzf(
+    terminal: &mut DefaultTerminal,
+    paused: &AtomicBool,
+    files: &[String],
+) -> Result<Option<String>, String> {
+    paused.store(true, Ordering::SeqCst);
+    thread::sleep(KEY_POLL * 2);
+    ratatui::restore();
+    // fzf draws on the terminal itself; only its answer comes back through the pipe.
+    let spawned = Command::new("fzf")
+        .args(["--prompt", "plot data > ", "--height", "40%", "--reverse"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn();
+    let result = match spawned {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                let list = files.join("\n");
+                // A thread, so a long list cannot fill the pipe while fzf waits for us to read.
+                thread::spawn(move || {
+                    let _ = stdin.write_all(list.as_bytes());
+                });
+            }
+            child
+                .wait_with_output()
+                .map_err(|error| format!("fzf failed: {error}"))
+                .map(|output| {
+                    let chosen = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                    // Esc and Ctrl+C make fzf exit non-zero with nothing on stdout.
+                    (output.status.success() && !chosen.is_empty()).then_some(chosen)
+                })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err("fzf not found; type the path instead".to_owned())
+        }
+        Err(error) => Err(format!("cannot start fzf: {error}")),
+    };
+    let back = enable_raw_mode().and_then(|()| execute!(stdout(), EnterAlternateScreen));
+    paused.store(false, Ordering::SeqCst);
+    back.map_err(|error| format!("cannot restore the terminal: {error}"))?;
+    let _ = terminal.clear();
+    result
 }
 
 /// Forward key presses from the terminal into our event channel.

@@ -665,6 +665,52 @@ pub fn add_to_dvc_yaml(text: &str, draft: &Draft) -> Result<String, String> {
     Ok(out.join("\n") + "\n")
 }
 
+/// Directories never worth looking into for data files.
+const SKIPPED_DIRS: [&str; 4] = ["target", "node_modules", "__pycache__", "venv"];
+const DATA_EXTENSIONS: [&str; 5] = ["csv", "tsv", "json", "yaml", "yml"];
+const MAX_DEPTH: usize = 8;
+
+/// Data files a plot can read, as paths relative to `root`, in directory order. Hidden
+/// directories (`.git`, `.dvc`, `.venv`) and `dvc.yaml` are left out.
+pub fn iter_data_files(root: &Path) -> impl Iterator<Item = String> {
+    let mut pending = vec![(root.to_path_buf(), 0_usize)];
+    let mut found: Vec<String> = Vec::new();
+    while let Some((dir, depth)) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if depth < MAX_DEPTH
+                    && !name.starts_with('.')
+                    && !SKIPPED_DIRS.contains(&name.as_str())
+                {
+                    pending.push((path, depth + 1));
+                }
+            } else if kind.is_file() && name != DVC_YAML {
+                let extension = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(str::to_ascii_lowercase);
+                if extension.is_some_and(|e| DATA_EXTENSIONS.contains(&e.as_str()))
+                    && let Ok(relative) = path.strip_prefix(root)
+                {
+                    found.push(relative.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    found.sort();
+    found.into_iter()
+}
+
 /// The column names of a data file, for the form's hint.
 pub fn columns(root: &Path, file: &str) -> Result<Vec<String>, String> {
     read_records(root, file).map(|r| r.columns)
@@ -913,6 +959,35 @@ mod tests {
     #[test]
     fn an_inline_section_is_refused_not_mangled() {
         assert!(add_to_dvc_yaml("plots: []\n", &draft("b.csv")).is_err());
+    }
+
+    #[test]
+    fn data_files_are_found_below_the_root_without_hidden_or_build_directories() {
+        let dir = project(
+            "plots: []\n",
+            &[("a.csv", ""), ("notes.txt", ""), ("params.yaml", "")],
+        );
+        for sub in ["metrics", ".git", "target", "metrics/deep"] {
+            fs::create_dir_all(dir.path().join(sub)).unwrap();
+        }
+        for file in [
+            "metrics/b.json",
+            "metrics/deep/c.TSV",
+            ".git/x.csv",
+            "target/y.csv",
+        ] {
+            fs::write(dir.path().join(file), "").unwrap();
+        }
+        let found: Vec<String> = iter_data_files(dir.path()).collect();
+        assert_eq!(
+            found,
+            [
+                "a.csv",
+                "metrics/b.json",
+                "metrics/deep/c.TSV",
+                "params.yaml"
+            ]
+        );
     }
 
     #[test]

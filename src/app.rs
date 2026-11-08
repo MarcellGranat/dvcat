@@ -29,6 +29,8 @@ use crate::{
     stale::{self, StageStatus},
 };
 
+/// At most this many files are offered to `fzf`.
+const MAX_PICK_FILES: usize = 5000;
 /// How many lines PageUp/PageDown move a preview.
 const PREVIEW_PAGE: usize = 15;
 /// How many lines PageUp/PageDown move the log.
@@ -367,6 +369,9 @@ pub struct App {
     pub preview: Option<Preview>,
     /// Set when the user asked for the editor; `main` takes it, suspends the UI and runs the editor.
     pub editor_request: Option<PathBuf>,
+    /// Set when the new-plot form wants a file chosen; `main` takes it, suspends the UI and runs
+    /// `fzf` over these paths, then reports the choice to [`App::file_picked`].
+    pub pick_request: Option<Vec<String>>,
     /// A one-line message for the footer; cleared by the next key press.
     pub notice: Option<String>,
     /// How to find `dvc`. A plain function pointer so tests can substitute their own.
@@ -402,6 +407,7 @@ impl App {
             file_cursor: 0,
             preview: None,
             editor_request: None,
+            pick_request: None,
             notice: None,
             dvc_lookup: runner::find_dvc_in_env,
             should_quit: false,
@@ -756,6 +762,16 @@ impl App {
         match form.on_key(key) {
             PlotFormAction::Continue => {}
             PlotFormAction::Cancel => self.plot_form = None,
+            PlotFormAction::PickFile => {
+                let files: Vec<String> = plots::iter_data_files(&self.project.root)
+                    .take(MAX_PICK_FILES)
+                    .collect();
+                if files.is_empty() {
+                    form.error = Some("no csv, tsv, json or yaml files in the project".to_owned());
+                } else {
+                    self.pick_request = Some(files);
+                }
+            }
             PlotFormAction::Submit(draft) => match self.add_plot(&draft) {
                 Ok(()) => {
                     self.plot_form = None;
@@ -1366,6 +1382,18 @@ impl App {
         // After the refresh, so a reload problem does not hide the editor's own error.
         if error.is_some() {
             self.notice = error;
+        }
+    }
+
+    /// `fzf` has exited: `Ok(None)` means nothing was chosen. A choice goes into the form's file field.
+    pub fn file_picked(&mut self, result: Result<Option<String>, String>) {
+        let Some(form) = &mut self.plot_form else {
+            return;
+        };
+        match result {
+            Ok(Some(file)) => form.set_file(&file),
+            Ok(None) => {}
+            Err(message) => form.error = Some(message),
         }
     }
 
@@ -3557,5 +3585,24 @@ mod dag_view_tests {
         assert!(app.plots.definition);
         press(&mut app, KeyCode::Char('d'));
         assert!(!app.plots.definition);
+    }
+
+    #[test]
+    fn ctrl_f_in_the_plot_form_requests_a_pick_and_the_choice_fills_the_file() {
+        let (_dir, mut app) = app_with_files(WITH_PLOTS);
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Char('n'));
+        app.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.pick_request.take().unwrap(), ["acc.csv"]);
+        app.file_picked(Ok(Some("acc.csv".to_owned())));
+        assert_eq!(app.plot_form.as_ref().unwrap().file(), "acc.csv");
+        app.file_picked(Err("fzf not found".to_owned()));
+        assert_eq!(
+            app.plot_form.as_ref().unwrap().error.as_deref(),
+            Some("fzf not found")
+        );
     }
 }
