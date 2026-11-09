@@ -1973,6 +1973,7 @@ mod run_tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_run_blocked_by_an_outside_dvc_offers_to_stop_it() {
         let mut h = harness("echo \"ERROR: x is busy, it is being blocked by:\"; exit 255");
         // A live process that looks like `dvc`, recorded in DVC's lock file.
@@ -2017,6 +2018,7 @@ mod run_tests {
     }
 
     /// A live process that looks like `dvc repro one`, recorded in DVC's lock as writing `out.csv`.
+    #[cfg(target_os = "linux")]
     fn outside_dvc(h: &Harness) -> std::process::Child {
         let other = h.dir.path().join("dvc");
         fs::write(&other, "#!/bin/sh\nsleep 60 &\nwait\n").unwrap();
@@ -2036,6 +2038,7 @@ mod run_tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn an_outside_run_is_noticed_without_any_failure_and_marks_its_stage() {
         let mut h = harness("exit 0");
         assert!(h.app.external.is_empty());
@@ -2066,6 +2069,7 @@ mod run_tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_stage_that_would_clash_with_an_outside_run_is_refused_with_the_reason() {
         let mut h = harness("exit 0");
         let mut child = outside_dvc(&h); // writes a.txt, which stage b depends on

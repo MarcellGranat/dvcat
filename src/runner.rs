@@ -823,6 +823,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn output_is_delivered_while_the_process_is_still_running() {
         let dir = tempfile::tempdir().unwrap();
         let dvc = fake_dvc(dir.path(), "echo first; sleep 2; echo second");
@@ -874,6 +875,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn wait_for_file(path: &Path) -> String {
         for _ in 0..200 {
             if let Ok(text) = fs::read_to_string(path)
@@ -962,6 +964,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn dropping_a_running_job_leaves_the_process_running() {
         let dir = tempfile::tempdir().unwrap();
         let dvc = fake_dvc(dir.path(), "sleep 60 &\necho $! > grandchild.pid\nwait");

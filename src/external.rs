@@ -402,6 +402,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stopping_ends_a_live_dvc_and_what_it_started() {
         let dir = tempfile::tempdir().unwrap();
         let dvc = dir.path().join("dvc");
