@@ -108,6 +108,13 @@ enum Action {
     Remove,
 }
 
+/// What `P` / `U` ask about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteAction {
+    Pull,
+    Push,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Pipeline,
@@ -224,6 +231,8 @@ pub enum RunKind {
     Branch {
         name: String,
     },
+    /// `dvc pull` / `dvc push`: only the stage statuses are re-checked afterwards.
+    Remote,
 }
 
 /// The most recent run (kept on screen after it ends, until the next one replaces it).
@@ -279,6 +288,11 @@ impl Run {
         Self::with_args(label, args, false, RunKind::Experiment)
     }
 
+    /// `dvc pull` or `dvc push`.
+    pub fn remote(label: String, args: Vec<String>) -> Self {
+        Self::with_args(label, args, false, RunKind::Remote)
+    }
+
     pub fn branch(label: String, args: Vec<String>, name: String) -> Self {
         Self::with_args(label, args, false, RunKind::Branch { name })
     }
@@ -305,6 +319,7 @@ impl Run {
             RunKind::Stage => ("stage", None),
             RunKind::Experiment => ("experiment", None),
             RunKind::Branch { name } => ("branch", Some(name.clone())),
+            RunKind::Remote => ("remote", None),
         };
         let started_ms = SystemTime::now()
             .checked_sub(self.started.elapsed())
@@ -325,6 +340,7 @@ impl Run {
     fn restored(record: &RunRecord) -> Self {
         let kind = match (record.kind.as_str(), &record.branch) {
             ("experiment", _) => RunKind::Experiment,
+            ("remote", _) => RunKind::Remote,
             ("branch", Some(name)) => RunKind::Branch { name: name.clone() },
             _ => RunKind::Stage,
         };
@@ -635,6 +651,8 @@ impl App {
                 };
                 Vec::new()
             }
+            KeyCode::Char('P') => self.ask_about_remote(RemoteAction::Pull),
+            KeyCode::Char('U') => self.ask_about_remote(RemoteAction::Push),
             // Stopping a run makes sense from either view.
             KeyCode::Char('x') => self.request_cancel(),
             KeyCode::Char('X') => {
@@ -1112,6 +1130,37 @@ impl App {
         self.form = Some(ExperimentForm::from_table(table, row));
     }
 
+    /// `P` / `U`: ask before pulling from or pushing to the DVC remote.
+    fn ask_about_remote(&mut self, action: RemoteAction) -> Vec<Effect> {
+        if self.is_running() {
+            self.notice = Some("a run is already in progress (x cancels it)".to_owned());
+            return Vec::new();
+        }
+        self.confirm = Some(match action {
+            RemoteAction::Pull => Confirm {
+                title: "Pull from the DVC remote?".to_owned(),
+                lines: vec![
+                    "Downloads the data that dvc.lock and the .dvc files point at.".into(),
+                    "Workspace files that differ from the cache are overwritten.".into(),
+                ],
+                label: "dvc pull".to_owned(),
+                args: runner::pull_args(),
+                kill: Vec::new(),
+            },
+            RemoteAction::Push => Confirm {
+                title: "Push to the DVC remote?".to_owned(),
+                lines: vec![
+                    "Uploads the cached outputs of dvc.lock and the .dvc files.".into(),
+                    "Other people with access to the remote can then pull them.".into(),
+                ],
+                label: "dvc push".to_owned(),
+                args: runner::push_args(),
+                kill: Vec::new(),
+            },
+        });
+        Vec::new()
+    }
+
     /// `a` / `d`: ask before applying or removing the experiment under the cursor.
     fn ask_about_selected_experiment(&mut self, action: Action) {
         let Some(name) = self.selected_experiment_for_action() else {
@@ -1250,7 +1299,12 @@ impl App {
     /// Start a `dvc` command that works on experiments, showing its log in the pipeline view.
     /// When it ends the experiments table is reloaded (see `on_run_finished`).
     fn begin_dvc_run(&mut self, label: String, args: Vec<String>) -> Vec<Effect> {
-        self.run = Some(Run::experiment(label, args));
+        let remote = matches!(args.first().map(String::as_str), Some("pull" | "push"));
+        self.run = Some(if remote {
+            Run::remote(label, args)
+        } else {
+            Run::experiment(label, args)
+        });
         // The log pane lives in the pipeline view, so show it.
         self.view = View::Pipeline;
         self.notice = Some("running; press e for the table when it ends".to_owned());
@@ -3017,6 +3071,44 @@ mod experiments_view_tests {
         h.wait_for_data();
         assert!(calls(&h).contains(&"exp apply lr-010".to_owned()));
         assert_eq!(h.fetch_count(), 2);
+    }
+
+    #[test]
+    fn p_and_u_ask_first_then_run_dvc_pull_and_push() {
+        for (key, title, command) in [
+            ('P', "Pull from the DVC remote?", "pull"),
+            ('U', "Push to the DVC remote?", "push"),
+        ] {
+            let mut h = with_table_loaded();
+            h.press(KeyCode::Char(key));
+            assert_eq!(h.app.confirm.as_ref().expect("asks first").title, title);
+            assert!(h.app.run.is_none(), "nothing runs before the answer");
+
+            let effects = h.press(KeyCode::Char('y'));
+            assert_eq!(effects, [Effect::StartExperiment]);
+            let run = h.app.run.as_ref().unwrap();
+            assert_eq!(run.kind, RunKind::Remote);
+            assert_eq!(run.command_line(), format!("dvc {command}"));
+            wait_until_finished(&mut h);
+            assert!(calls(&h).contains(&command.to_owned()));
+            assert!(!h.app.experiments.loading, "the table is not reloaded");
+            assert_eq!(h.fetch_count(), 1);
+        }
+    }
+
+    #[test]
+    fn declining_pull_or_push_runs_nothing() {
+        let mut h = with_table_loaded();
+        h.press(KeyCode::Char('U'));
+        h.press(KeyCode::Esc);
+        assert!(h.app.confirm.is_none() && h.app.run.is_none());
+        assert_eq!(calls(&h), ["exp show --json -A"]);
+    }
+
+    #[test]
+    fn a_remote_run_survives_being_recorded_and_restored() {
+        let run = Run::remote("dvc pull".to_owned(), runner::pull_args());
+        assert_eq!(Run::restored(&run.record()).kind, RunKind::Remote);
     }
 
     #[test]

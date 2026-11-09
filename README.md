@@ -55,6 +55,7 @@ If none is found, pressing `r` explains where it looked.
 | `R`        | run it with stale upstream stages (`dvc repro`) |
 | `x`        | cancel the running stage (from either view) |
 | `X`        | stop a `dvc` process started outside dvcat (asks first) |
+| `P` / `U`  | `dvc pull` / `dvc push` against the default remote (from any view, after a yes/no question); the log is shown in the pipeline view and the stage statuses are re-checked afterwards |
 | `PgUp` / `PgDn` | scroll the log                      |
 | `1` `2` `3` `4` | pipeline / graph / experiments / plots view (also `g` for the graph, `e` for the experiments, `p` for the plots) |
 | `e`        | switch between the pipeline and the experiments table |
@@ -63,7 +64,7 @@ If none is found, pressing `r` explains where it looked.
 | `s`        | *(experiments)* sort by the cursor column; again flips the direction |
 | `m`        | *(experiments)* show metrics of experiments as differences from their baseline (`▲ +0.1867`) and back |
 | `t`        | *(experiments)* transpose: experiments across the top, params and metrics down the side (`h`/`j`/`k`/`l` follow the screen) |
-| `F5`       | *(experiments)* reload with `dvc exp show --json` |
+| `F5`       | *(experiments)* reload with `dvc exp show --json -A` |
 | `n`        | *(experiments)* new experiment: a form with a name and every param, pre-filled from the row under the cursor |
 | `a` / `d`  | *(experiments)* apply / remove the experiment under the cursor, after a yes/no question |
 | `c`        | *(experiments)* edit the message of the experiment under the cursor (the text of `dvc exp run -m`); it is shown under the table |
