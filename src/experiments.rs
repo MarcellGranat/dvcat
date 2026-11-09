@@ -442,7 +442,7 @@ fn compare(a: Option<SortValue>, b: Option<SortValue>, direction: Direction) -> 
 // Fetching
 // ---------------------------------------------------------------------------------------------
 
-/// Run `dvc exp show --json` in `root` and parse it. Blocking: call it from a background thread.
+/// Run `dvc exp show --json -A` (all commits, not only the current one) in `root` and parse it. Blocking: call it from a background thread.
 /// Every failure becomes a readable message for the UI.
 pub fn fetch(dvc: &Path, root: &Path) -> Result<Table, String> {
     let output = run_to_end(dvc, root)
@@ -488,7 +488,7 @@ fn failure_message(code: &str, stderr: &str) -> String {
 fn run_to_end(dvc: &Path, root: &Path) -> io::Result<Output> {
     let mut command = Command::new(dvc);
     command
-        .args(["exp", "show", "--json"])
+        .args(["exp", "show", "--json", "-A"])
         .current_dir(root)
         .stdin(Stdio::null());
     // A script written a moment ago can look "busy" to exec; it clears up almost immediately.
