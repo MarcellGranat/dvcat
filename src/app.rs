@@ -75,6 +75,35 @@ pub struct Confirm {
     /// When not empty, confirming stops these `dvc` processes (started outside dvcat) instead of
     /// running `args`.
     pub kill: Vec<u32>,
+    /// Options the user can switch on before confirming (each adds `args` to the command).
+    pub toggles: Vec<Toggle>,
+}
+
+/// An option of a [`Confirm`], switched by pressing its key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Toggle {
+    pub key: char,
+    pub text: String,
+    pub on: bool,
+    /// Appended to the command while the option is on.
+    pub args: Vec<String>,
+}
+
+impl Confirm {
+    /// The label and arguments of the run: the base ones plus those of the options that are on.
+    /// With options, the label is the command line itself, so the header shows what runs.
+    pub fn command(&self) -> (String, Vec<String>) {
+        let mut args = self.args.clone();
+        for toggle in self.toggles.iter().filter(|t| t.on) {
+            args.extend(toggle.args.iter().cloned());
+        }
+        let label = if self.toggles.is_empty() {
+            self.label.clone()
+        } else {
+            format!("dvc {}", args.join(" "))
+        };
+        (label, args)
+    }
 }
 
 /// The question asked when a run could not start because other `dvc` processes hold the lock.
@@ -94,6 +123,7 @@ fn blocked_confirm(blocking: &[external::ExternalRun]) -> Confirm {
         label: "stop external dvc".to_owned(),
         args: Vec::new(),
         kill: blocking.iter().map(|run| run.pid).collect(),
+        toggles: Vec::new(),
     }
 }
 
@@ -1189,12 +1219,34 @@ impl App {
                 format!("dvc push -r {name}"),
             ),
         };
+        // `dvc pull` / `dvc push` take stage names as targets, so offer the selected stage.
+        let stage = matches!(self.view, View::Pipeline | View::Dag)
+            .then(|| self.selected_stage())
+            .flatten()
+            .filter(|stage| stage.unsupported.is_none())
+            .map(|stage| stage.name.clone());
+        let mut toggles = Vec::new();
+        if let Some(stage) = stage {
+            toggles.push(Toggle {
+                key: 't',
+                text: format!("only the data of stage {stage}"),
+                on: false,
+                args: vec![stage],
+            });
+        }
+        toggles.push(Toggle {
+            key: 'c',
+            text: "include the run-cache (--run-cache)".to_owned(),
+            on: false,
+            args: vec!["--run-cache".to_owned()],
+        });
         self.confirm = Some(Confirm {
             title,
             lines: vec![format!("Remote {name}: {url}"), what.to_owned()],
             label,
             args: remotes::transfer_args(transfer, &name),
             kill: Vec::new(),
+            toggles,
         });
     }
 
@@ -1213,6 +1265,7 @@ impl App {
                 label: format!("apply {name}"),
                 args: runner::exp_apply_args(&name),
                 kill: Vec::new(),
+                toggles: Vec::new(),
             },
             Action::Remove => Confirm {
                 title: format!("Remove {name}?"),
@@ -1223,6 +1276,7 @@ impl App {
                 label: format!("remove {name}"),
                 args: runner::exp_remove_args(&name),
                 kill: Vec::new(),
+                toggles: Vec::new(),
             },
         });
     }
@@ -1322,11 +1376,25 @@ impl App {
                     self.notice = Some("stopping the other dvc process…".to_owned());
                     vec![Effect::StopExternal(kill)]
                 }
-                Some(Confirm { label, args, .. }) => self.begin_dvc_run(label, args),
+                Some(confirm) => {
+                    let (label, args) = confirm.command();
+                    self.begin_dvc_run(label, args)
+                }
                 None => Vec::new(),
             },
             KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
                 self.confirm = None;
+                Vec::new()
+            }
+            KeyCode::Char(key) => {
+                if let Some(toggle) = self
+                    .confirm
+                    .iter_mut()
+                    .flat_map(|confirm| confirm.toggles.iter_mut())
+                    .find(|toggle| toggle.key == key)
+                {
+                    toggle.on = !toggle.on;
+                }
                 Vec::new()
             }
             _ => Vec::new(),
@@ -3171,6 +3239,38 @@ mod experiments_view_tests {
             wait_until_finished(&mut h);
             assert!(calls(&h).contains(&format!("{command} -r origin")));
         }
+    }
+
+    #[test]
+    fn t_and_c_add_the_selected_stage_and_the_run_cache_to_the_command() {
+        let mut h = with_remotes("origin\tx\\n", "origin");
+        let stage = h.app.selected_stage().unwrap().name.clone();
+        h.press(KeyCode::Char('U'));
+        wait_for_remotes(&mut h);
+        h.press(KeyCode::Char('t'));
+        h.press(KeyCode::Char('c'));
+        assert!(h.app.confirm.as_ref().unwrap().toggles.iter().all(|t| t.on));
+        h.press(KeyCode::Char('c')); // off again
+        h.press(KeyCode::Char('c')); // and on
+        h.press(KeyCode::Enter);
+        wait_until_finished(&mut h);
+        let expected = format!("push -r origin {stage} --run-cache");
+        assert!(calls(&h).contains(&expected), "{:?}", calls(&h));
+        assert_eq!(
+            h.app.run.as_ref().unwrap().command_line(),
+            format!("dvc {expected}")
+        );
+    }
+
+    #[test]
+    fn the_stage_is_not_offered_outside_the_stage_views() {
+        let mut h = with_remotes("origin\tx\\n", "origin");
+        h.app.view = View::Plots;
+        h.press(KeyCode::Char('P'));
+        wait_for_remotes(&mut h);
+        let toggles = &h.app.confirm.as_ref().unwrap().toggles;
+        assert_eq!(toggles.len(), 1);
+        assert_eq!(toggles[0].key, 'c');
     }
 
     #[test]

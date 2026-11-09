@@ -775,7 +775,8 @@ fn render_confirm(confirm: &Confirm, frame: &mut Frame, area: Rect) {
         .lines
         .iter()
         .map(|line| line.chars().count().div_ceil(inner).max(1))
-        .sum();
+        .sum::<usize>()
+        + confirm.toggles.len();
     // text + a blank line + the yes/no line + two border rows
     let height = (wrapped as u16 + 4).min(area.height);
     let popup = Rect::new(
@@ -791,6 +792,23 @@ fn render_confirm(confirm: &Confirm, frame: &mut Frame, area: Rect) {
         .map(|l| Line::from(l.as_str()))
         .collect();
     text.push(Line::from(""));
+    for toggle in &confirm.toggles {
+        let (mark, color) = if toggle.on {
+            ("[x]", theme::GREEN)
+        } else {
+            ("[ ]", theme::OVERLAY0)
+        };
+        text.push(Line::from(vec![
+            Span::styled(mark, Style::new().fg(color)),
+            Span::styled(
+                format!(" {} ", toggle.key),
+                Style::new()
+                    .fg(theme::LAVENDER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(toggle.text.clone()),
+        ]));
+    }
     text.push(Line::from(vec![
         Span::styled(
             "y",
@@ -997,7 +1015,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        app::{Run, RunPhase},
+        app::{Run, RunPhase, Toggle},
         files::Preview,
         runner::RunOutcome,
         test_support::{app_at, app_with_files, demo_app, fixture, with_statuses},
@@ -1538,6 +1556,7 @@ mod tests {
             label: "remove lr-005".into(),
             args: vec![],
             kill: vec![],
+            toggles: vec![],
         });
         let rows = render(&app, 100, 24);
         let text = rows.join("\n");
@@ -1550,6 +1569,35 @@ mod tests {
         for (w, h) in [(10, 4), (1, 1)] {
             let _ = render(&app, w, h); // must not panic
         }
+    }
+
+    #[test]
+    fn confirm_popup_lists_its_toggles() {
+        let mut app = demo_app();
+        app.confirm = Some(Confirm {
+            title: "Push to origin?".into(),
+            lines: vec!["Uploads.".into()],
+            label: "dvc push".into(),
+            args: vec![],
+            kill: vec![],
+            toggles: vec![
+                Toggle {
+                    key: 't',
+                    text: "only the data of stage a".into(),
+                    on: true,
+                    args: vec![],
+                },
+                Toggle {
+                    key: 'c',
+                    text: "include the run-cache".into(),
+                    on: false,
+                    args: vec![],
+                },
+            ],
+        });
+        let text = render(&app, 100, 24).join("\n");
+        assert!(text.contains("[x] t only the data of stage a"), "{text}");
+        assert!(text.contains("[ ] c include the run-cache"), "{text}");
     }
 
     #[test]
