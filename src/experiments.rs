@@ -870,7 +870,7 @@ mod tests {
         let dvc = fake_dvc(
             dir.path(),
             &format!(
-                "[ \"$*\" = \"exp show --json\" ] || {{ echo \"bad args: $*\" >&2; exit 9; }}\ncat '{}'",
+                "[ \"$*\" = \"exp show --json -A\" ] || {{ echo \"bad args: $*\" >&2; exit 9; }}\ncat '{}'",
                 json_path.display()
             ),
         );

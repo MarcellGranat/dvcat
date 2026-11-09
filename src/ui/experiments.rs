@@ -42,7 +42,7 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 
     match &view.data {
         None if view.loading => {
-            let text = "loading… (running `dvc exp show --json`)";
+            let text = "loading… (running `dvc exp show --json -A`)";
             frame.render_widget(Paragraph::new(text).style(theme::muted()), inner);
         }
         None => {
@@ -762,7 +762,7 @@ mod tests {
         app.experiments.loading = true;
         let text = screen(&app, 100, 10).join("\n");
         assert!(
-            text.contains("loading…") && text.contains("dvc exp show --json"),
+            text.contains("loading…") && text.contains("dvc exp show --json -A"),
             "{text}"
         );
 

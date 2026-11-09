@@ -2278,6 +2278,7 @@ mod run_tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn is_gone(pid: u32) -> bool {
         match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Err(_) => true,
@@ -2289,6 +2290,7 @@ mod run_tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn quitting_leaves_a_running_job_running_and_says_so() {
         let mut h = harness("sleep 60 &\necho $! > grandchild.pid\nwait");
         h.press(KeyCode::Char('r'));
@@ -2322,6 +2324,7 @@ mod run_tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn quitting_while_cancelling_waits_until_the_process_is_gone() {
         let mut h = harness("sleep 60 &\necho $! > grandchild.pid\nwait");
         h.press(KeyCode::Char('r'));
@@ -2499,7 +2502,7 @@ mod experiments_view_tests {
 
         fn fetch_count(&self) -> usize {
             fs::read_to_string(self.dir.path().join("calls.log"))
-                .map(|log| log.lines().filter(|l| *l == "exp show --json").count())
+                .map(|log| log.lines().filter(|l| *l == "exp show --json -A").count())
                 .unwrap_or(0)
         }
     }
@@ -2977,7 +2980,7 @@ mod experiments_view_tests {
         h.press(KeyCode::Char('d'));
         h.press(KeyCode::Esc);
         assert!(h.app.confirm.is_none() && h.app.run.is_none());
-        assert_eq!(calls(&h), ["exp show --json"], "only the initial fetch");
+        assert_eq!(calls(&h), ["exp show --json -A"], "only the initial fetch");
     }
 
     #[test]
@@ -3134,7 +3137,7 @@ mod experiments_view_tests {
         assert!(h.app.prompt.as_ref().unwrap().value.ends_with("qe"));
         h.press(KeyCode::Esc);
         assert!(h.app.prompt.is_none() && h.app.run.is_none());
-        assert_eq!(calls(&h), ["exp show --json"]);
+        assert_eq!(calls(&h), ["exp show --json -A"]);
     }
 
     #[test]
