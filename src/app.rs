@@ -14,7 +14,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::{
     dag::{self, Layout, Move},
     dvc_yaml,
-    experiments::{self, RowKind, Sort, Table},
+    experiments::{self, ColumnQuery, RowKind, Scope, Sort, Table},
     external,
     files::{self, FileEntry, Preview},
     form::{ExperimentForm, FormAction, edit_text},
@@ -211,6 +211,12 @@ pub struct ExperimentsView {
     pub transpose: bool,
     /// Param columns that are not shown (`v` / `H`).
     pub hidden: BTreeSet<String>,
+    /// Which kind of columns are shown (`Tab`).
+    pub scope: Scope,
+    /// Also show the columns that hold the same value in every row (`u`).
+    pub show_unchanged: bool,
+    /// Only columns whose label contains all these words are shown (`/`).
+    pub filter: String,
 }
 
 impl ExperimentsView {
@@ -218,9 +224,19 @@ impl ExperimentsView {
         self.data.as_ref()?.as_ref().ok()
     }
 
-    /// The columns on screen: those of `table` minus the hidden params.
+    /// The columns on screen, as chosen by the scope, the filter and the hidden params.
     pub fn columns(&self, table: &Table) -> Vec<experiments::Column> {
-        table.columns_hiding(&self.hidden)
+        table.columns_for(&ColumnQuery {
+            scope: self.scope,
+            hidden: &self.hidden,
+            show_unchanged: self.show_unchanged,
+            filter: &self.filter,
+        })
+    }
+
+    /// Start again from the first column, after the set of columns changed.
+    fn columns_changed(&mut self) {
+        self.column = 0;
     }
 }
 
@@ -1094,6 +1110,19 @@ impl App {
             KeyCode::Char('p') => self.experiments.plot = !self.experiments.plot,
             KeyCode::Char('[') => self.cycle_plot_metric(false),
             KeyCode::Char(']') => self.cycle_plot_metric(true),
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.experiments.scope = self.experiments.scope.cycle(code == KeyCode::Tab);
+                self.experiments.columns_changed();
+            }
+            KeyCode::Char('u') => {
+                self.experiments.show_unchanged = !self.experiments.show_unchanged;
+                self.experiments.columns_changed();
+            }
+            KeyCode::Char('/') => {
+                self.prompt = Some(Prompt::filter(&self.experiments.filter));
+            }
+            KeyCode::Char('{') => self.jump_group(false),
+            KeyCode::Char('}') => self.jump_group(true),
             KeyCode::Char('v') => self.open_param_picker(),
             KeyCode::Char('H') => self.hide_cursor_param(),
             KeyCode::Char('n') => self.open_experiment_form(),
@@ -1102,11 +1131,39 @@ impl App {
             KeyCode::Char('a') => self.ask_about_selected_experiment(Action::Apply),
             KeyCode::Char('d') => self.ask_about_selected_experiment(Action::Remove),
             KeyCode::F(5) => return self.request_experiments(),
+            // Esc first drops the filter, then leaves.
+            KeyCode::Esc if !self.experiments.filter.is_empty() => {
+                self.experiments.filter.clear();
+                self.experiments.columns_changed();
+            }
             KeyCode::Esc => self.view = View::Pipeline,
             _ => {}
         }
         self.clamp_experiments_cursor();
         Vec::new()
+    }
+
+    /// `{` / `}`: move the column cursor to the first column of the previous / next group.
+    fn jump_group(&mut self, forward: bool) {
+        let Some(table) = self.experiments.table() else {
+            return;
+        };
+        let columns = self.experiments.columns(table);
+        let at = self.experiments.column.min(columns.len().saturating_sub(1));
+        let group = |index: usize| columns.get(index).and_then(experiments::Column::group);
+        // Where a group begins: the column is in a group and the one before it is in another.
+        let starts: Vec<usize> = (1..columns.len())
+            .filter(|&i| group(i).is_some() && group(i) != group(i - 1))
+            .collect();
+        let target = if forward {
+            starts.iter().copied().find(|&i| i > at)
+        } else {
+            starts.iter().copied().rev().find(|&i| i < at)
+        };
+        match target {
+            Some(index) => self.experiments.column = index,
+            None => self.notice = Some("no more groups in that direction".to_owned()),
+        }
     }
 
     fn open_param_picker(&mut self) {
@@ -1358,6 +1415,12 @@ impl App {
                 Vec::new()
             }
             PromptAction::Submit(text) => {
+                if prompt.kind == PromptKind::Filter {
+                    self.prompt = None;
+                    self.experiments.filter = text;
+                    self.experiments.columns_changed();
+                    return Vec::new();
+                }
                 if let PromptKind::Comment { rev } = prompt.kind.clone() {
                     let old = self
                         .experiments
@@ -2694,7 +2757,11 @@ mod experiments_view_tests {
     fn serving_two() -> Harness {
         let json = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/exp_show/two.json");
-        harness(&format!("cat '{}'", json.display()))
+        let mut h = harness(&format!("cat '{}'", json.display()));
+        // Most tests walk over every column; the defaults show fewer (see the scope tests).
+        h.app.experiments.scope = Scope::All;
+        h.app.experiments.show_unchanged = true;
+        h
     }
 
     impl Harness {
@@ -2722,6 +2789,97 @@ mod experiments_view_tests {
                 .map(|log| log.lines().filter(|l| *l == "exp show --json -A").count())
                 .unwrap_or(0)
         }
+    }
+
+    fn column_titles(h: &Harness) -> Vec<String> {
+        let table = h.app.experiments.table().unwrap();
+        h.app
+            .experiments
+            .columns(table)
+            .iter()
+            .map(|c| c.title().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_table_starts_with_the_params_that_differ_and_tab_walks_the_scopes() {
+        let mut h = serving_two();
+        h.app.experiments.scope = Scope::default();
+        h.app.experiments.show_unchanged = false;
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+        assert_eq!(
+            column_titles(&h),
+            ["name", "params.yaml:train.epochs", "params.yaml:train.lr"]
+        );
+
+        h.app.experiments.column = 2;
+        h.press(KeyCode::Tab);
+        assert_eq!(h.app.experiments.scope, Scope::Metrics);
+        assert_eq!(h.app.experiments.column, 0, "the cursor starts over");
+        assert_eq!(
+            column_titles(&h),
+            ["name", "metrics.json:auc", "metrics.json:loss"]
+        );
+        h.press(KeyCode::Tab);
+        assert_eq!(h.app.experiments.scope, Scope::All);
+        h.press(KeyCode::Tab);
+        assert_eq!(h.app.experiments.scope, Scope::Params);
+        h.press(KeyCode::BackTab);
+        assert_eq!(h.app.experiments.scope, Scope::All);
+
+        h.press(KeyCode::Char('u'));
+        assert_eq!(column_titles(&h).len(), 6, "unchanged columns are back");
+    }
+
+    #[test]
+    fn slash_filters_the_columns_and_esc_drops_the_filter_before_leaving() {
+        let mut h = serving_two();
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+        h.press(KeyCode::Char('/'));
+        assert!(h.app.prompt.is_some());
+        type_text(&mut h, "lr");
+        h.press(KeyCode::Enter);
+        assert!(h.app.prompt.is_none());
+        assert_eq!(h.app.experiments.filter, "lr");
+        assert_eq!(column_titles(&h), ["name", "params.yaml:train.lr"]);
+
+        h.press(KeyCode::Esc);
+        assert!(h.app.experiments.filter.is_empty());
+        assert_eq!(h.app.view, View::Experiments, "the first Esc only clears");
+        assert_eq!(column_titles(&h).len(), 6);
+        h.press(KeyCode::Esc);
+        assert_eq!(h.app.view, View::Pipeline);
+    }
+
+    #[test]
+    fn braces_jump_between_groups() {
+        let mut h = serving_two();
+        h.press(KeyCode::Char('e'));
+        h.wait_for_data();
+        // name | features.scale | train.epochs train.lr | auc loss (files: params.yaml, metrics.json)
+        h.press(KeyCode::Char('}'));
+        assert_eq!(
+            h.app.experiments.column, 1,
+            "from the name to the first group"
+        );
+        h.press(KeyCode::Char('}'));
+        assert_eq!(h.app.experiments.column, 2, "train");
+        h.press(KeyCode::Char('}'));
+        assert_eq!(h.app.experiments.column, 4, "metrics.json");
+        h.press(KeyCode::Char('}'));
+        assert_eq!(h.app.experiments.column, 4, "no further group");
+        assert!(h.app.notice.is_some());
+        h.press(KeyCode::Char('{'));
+        assert_eq!(h.app.experiments.column, 2);
+        h.press(KeyCode::Char('{'));
+        assert_eq!(h.app.experiments.column, 1);
+        h.press(KeyCode::Char('{'));
+        assert_eq!(
+            h.app.experiments.column, 1,
+            "the first group has none before it"
+        );
     }
 
     #[test]

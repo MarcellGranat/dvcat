@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     symbols::Marker,
-    text::Span,
+    text::{Line, Span},
     widgets::{
         Axis, Cell, Chart, Dataset, GraphType, Paragraph, Row as TableRow, Table as TableWidget,
         TableState, Wrap,
@@ -15,8 +15,8 @@ use ratatui::{
 use crate::{
     app::{App, ExperimentsView},
     experiments::{
-        Change, Column, Direction, Row, RowKind, Table, baseline_of, cell_text, metric_delta,
-        param_differs,
+        Change, Column, Direction, Row, RowKind, Scope, Table, baseline_of, cell_text,
+        metric_delta, param_differs,
     },
     plot, theme,
 };
@@ -116,6 +116,9 @@ fn title(app: &App) -> String {
             " · loading…"
         });
     }
+    if let Some(table) = app.experiments.table() {
+        title.push_str(&scope_summary(&app.experiments, table));
+    }
     if app.experiments.transpose {
         title.push_str(" · transposed");
     }
@@ -128,12 +131,48 @@ fn title(app: &App) -> String {
     title
 }
 
+/// ` · [Params] Metrics All · 7/120 columns · filter "x"`: what is on screen, and how to change it.
+fn scope_summary(view: &ExperimentsView, table: &Table) -> String {
+    let tabs: Vec<String> = Scope::ALL
+        .iter()
+        .map(|scope| {
+            if *scope == view.scope {
+                format!("[{}]", scope.label())
+            } else {
+                scope.label().to_owned()
+            }
+        })
+        .collect();
+    let total = match view.scope {
+        Scope::Params => table.param_columns.len(),
+        Scope::Metrics => table.metric_columns.len(),
+        Scope::All => table.param_columns.len() + table.metric_columns.len(),
+    };
+    let shown = view
+        .columns(table)
+        .iter()
+        .filter(|column| matches!(column, Column::Param(_) | Column::Metric(_)))
+        .count();
+    let mut out = format!(" · {} (Tab) · {shown}/{total} columns", tabs.join(" "));
+    if !view.filter.is_empty() {
+        out.push_str(&format!(" · filter \"{}\"", view.filter));
+    }
+    if !view.show_unchanged {
+        out.push_str(" · unchanged hidden (u)");
+    }
+    out
+}
+
 fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: Rect) {
     if view.transpose {
         return render_transposed(view, table, frame, area);
     }
-    let [table_area, info_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    let [band_area, table_area, info_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
 
     let columns = view.columns(table);
     let rows = table.ordered(&view.sort);
@@ -141,8 +180,13 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
     let cursor_column = view.column.min(columns.len().saturating_sub(1));
     let shown = visible_columns(&widths, cursor_column, usize::from(table_area.width));
 
+    frame.render_widget(
+        Paragraph::new(group_band(&columns, &shown, &widths)),
+        band_area,
+    );
+
     let header = TableRow::new(shown.iter().map(|&i| {
-        let mut text = columns[i].title().to_owned();
+        let mut text = columns[i].short_title().to_owned();
         if let Some(direction) = view.sort.direction_of(&columns[i]) {
             text = format!(
                 "{} {}",
@@ -181,6 +225,58 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
 
     let info = info_line(view, table, &columns[cursor_column], &rows);
     frame.render_widget(info, info_area);
+}
+
+/// The line above the headers: the group (`params.yaml:train`) over the columns that belong to it,
+/// so hundreds of columns read as a few labelled blocks.
+fn group_band(columns: &[Column], shown: &[usize], widths: &[usize]) -> Line<'static> {
+    let mut spans: Vec<Span> = Vec::new();
+    let mut k = 0;
+    let mut block = 0;
+    let mut previous_file = "";
+    while k < shown.len() {
+        let group = columns[shown[k]].group();
+        let mut end = k;
+        while end + 1 < shown.len() && columns[shown[end + 1]].group() == group {
+            end += 1;
+        }
+        let width: usize =
+            shown[k..=end].iter().map(|&i| widths[i]).sum::<usize>() + COLUMN_SPACING * (end - k);
+        let (text, style) = match group {
+            Some(group) => {
+                let style = if block % 2 == 0 {
+                    Style::new()
+                        .fg(header_color(&columns[shown[k]]))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(theme::OVERLAY1)
+                };
+                block += 1;
+                // Say the file once; the groups after it in the same file only need their key.
+                let (file, key) = group.split_once(':').unwrap_or((group, ""));
+                // When the file does not fit as well, the key is what tells groups apart.
+                let name = if !key.is_empty()
+                    && (file == previous_file || group.chars().count() + 1 > width)
+                {
+                    key.to_owned()
+                } else {
+                    group.to_owned()
+                };
+                previous_file = file;
+                (format!("▎{name}"), style)
+            }
+            None => (String::new(), Style::new()),
+        };
+        spans.push(Span::styled(
+            format!("{:<width$}", fit(&text, width)),
+            style,
+        ));
+        if end + 1 < shown.len() {
+            spans.push(Span::raw(" ".repeat(COLUMN_SPACING)));
+        }
+        k = end + 1;
+    }
+    Line::from(spans)
 }
 
 /// The table turned on its side: a column per experiment, a row per param or metric.
@@ -464,7 +560,7 @@ fn column_widths(view: &ExperimentsView, columns: &[Column], rows: &[&Row]) -> V
         .map(|column| {
             let cells =
                 (0..rows.len()).map(|index| body_cell(view, rows, index, column).0.chars().count());
-            let title = column.title().chars().count() + 2;
+            let title = column.short_title().chars().count() + 2;
             cells
                 .chain([title])
                 .max()
@@ -528,6 +624,9 @@ mod tests {
         let mut app = demo_app();
         app.view = View::Experiments;
         app.experiments.data = data;
+        // These tests look at every column; the defaults show fewer (see the scope tests).
+        app.experiments.scope = Scope::All;
+        app.experiments.show_unchanged = true;
         app
     }
 
@@ -635,10 +734,15 @@ mod tests {
     fn table_lists_workspace_baseline_then_experiments_with_param_and_metric_columns() {
         let app = app_showing(Some(Ok(two())));
         let rows = screen(&app, 150, 14);
-        let header = line_with(&rows, "params.yaml:train.lr");
+        let header = line_with(&rows, "name");
         assert!(
-            header.contains("name") && header.contains("metrics.json:auc"),
-            "{header}"
+            header.contains("lr") && header.contains("auc") && !header.contains("metrics.json"),
+            "headers are the key inside the group: {header}"
+        );
+        let band = line_with(&rows, "▎feat");
+        assert!(
+            band.contains("▎train") && band.contains("▎metrics.json"),
+            "the band names the groups, the file only when there is room: {band}"
         );
 
         let order: Vec<usize> = ["workspace", "master", "└ lr-010", "└ lr-005"]
@@ -667,7 +771,7 @@ mod tests {
         let auc = Column::Metric("metrics.json:auc".into());
         app.experiments.sort.choose(auc.clone());
         let rows = screen(&app, 150, 14);
-        assert!(line_with(&rows, "metrics.json:auc").contains('▲'));
+        assert!(line_with(&rows, "auc").contains('▲'));
         let (a, b) = (
             rows.iter().position(|r| r.contains("lr-005")).unwrap(),
             rows.iter().position(|r| r.contains("lr-010")).unwrap(),
@@ -676,7 +780,7 @@ mod tests {
 
         app.experiments.sort.choose(auc);
         let rows = screen(&app, 150, 14);
-        assert!(line_with(&rows, "metrics.json:auc").contains('▼'));
+        assert!(line_with(&rows, "auc").contains('▼'));
         let (a, b) = (
             rows.iter().position(|r| r.contains("lr-005")).unwrap(),
             rows.iter().position(|r| r.contains("lr-010")).unwrap(),
@@ -701,13 +805,10 @@ mod tests {
     fn hidden_params_have_no_column_and_the_info_line_counts_them() {
         let mut app = app_showing(Some(Ok(two())));
         let before = screen(&app, 150, 14).join("\n");
-        assert!(before.contains("params.yaml:train.lr"), "{before}");
+        assert!(before.contains("5/5 columns"), "{before}");
         app.experiments.hidden.insert("params.yaml:train.lr".into());
         let rows = screen(&app, 150, 14);
-        assert!(
-            !rows.join("\n").contains("params.yaml:train.lr"),
-            "{rows:?}"
-        );
+        assert!(rows.join("\n").contains("4/5 columns"), "{rows:?}");
         assert!(line_with(&rows, "column:").contains("1 params hidden (v)"));
     }
 
@@ -741,10 +842,10 @@ mod tests {
     fn narrow_terminals_keep_the_name_column_and_the_cursor_column() {
         let mut app = app_showing(Some(Ok(two())));
         app.experiments.column = 5; // metrics.json:loss, the last column
-        let rows = screen(&app, 60, 14);
+        let rows = screen(&app, 30, 14);
         let header = line_with(&rows, "name");
-        assert!(header.contains("metrics.json:loss"), "{header}");
-        assert!(!header.contains("params.yaml:features.scale"), "{header}");
+        assert!(header.contains("loss"), "{header}");
+        assert!(!header.contains("scale"), "{header}");
         assert!(
             rows.iter().any(|r| r.contains("workspace")),
             "name column stays"

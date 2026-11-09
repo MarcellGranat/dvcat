@@ -23,6 +23,8 @@ pub struct Prompt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptKind {
     Branch,
+    /// Words the experiments table's column labels must contain; an empty answer clears it.
+    Filter,
     /// A new message for the experiment commit `rev`; the answer replaces the first line.
     Comment {
         rev: String,
@@ -48,6 +50,20 @@ impl Prompt {
             kind: PromptKind::Branch,
             hint: "creates the branch; it is not checked out",
             validate: validate_branch_name,
+        }
+    }
+
+    /// Ask for the words to filter the columns of the experiments table by.
+    pub fn filter(current: &str) -> Self {
+        Self {
+            title: "Filter columns".to_owned(),
+            label: "words".to_owned(),
+            target: String::new(),
+            value: current.to_owned(),
+            error: None,
+            kind: PromptKind::Filter,
+            hint: "columns whose label contains all the words; empty shows all (Esc in the table clears it too)",
+            validate: |_| Ok(()),
         }
     }
 

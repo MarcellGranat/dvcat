@@ -62,6 +62,10 @@ If none is found, pressing `r` explains where it looked.
 | `g`        | show the stage graph (`g` or `Esc` to leave); `h`/`l` follow the edges, `j`/`k` move within a layer, `Enter` opens the stage, `r`/`R` run it |
 | `h` / `l`  | *(experiments)* move the column cursor   |
 | `s`        | *(experiments)* sort by the cursor column; again flips the direction |
+| `Tab` / `Shift+Tab` | *(experiments)* switch between **Params**, **Metrics** and **All**; the title shows which is active and how many columns of how many are on screen. The table starts on the Params that differ between rows |
+| `u`        | *(experiments)* show / hide the columns that hold the same value in every row (hidden at first) |
+| `/`        | *(experiments)* filter the columns: only labels that contain all the typed words (any case) stay; empty clears it, `Esc` in the table clears it too |
+| `{` / `}`  | *(experiments)* jump to the previous / next group of columns. The line above the headers names the group (`params.yaml:train`, `metrics/accuracy.json:by_fold.0`), the header is the key inside it |
 | `m`        | *(experiments)* show metrics of experiments as differences from their baseline (`▲ +0.1867`) and back |
 | `t`        | *(experiments)* transpose: experiments across the top, params and metrics down the side (`h`/`j`/`k`/`l` follow the screen) |
 | `F5`       | *(experiments)* reload with `dvc exp show --json -A` |

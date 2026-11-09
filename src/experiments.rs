@@ -91,7 +91,77 @@ pub enum Column {
     Duration,
 }
 
+/// Which kind of columns the table shows. Hundreds of params and metrics do not fit one table,
+/// so they are looked at one kind at a time (`Tab` switches).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Scope {
+    #[default]
+    Params,
+    Metrics,
+    All,
+}
+
+impl Scope {
+    pub const ALL: [Scope; 3] = [Scope::Params, Scope::Metrics, Scope::All];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Scope::Params => "Params",
+            Scope::Metrics => "Metrics",
+            Scope::All => "All",
+        }
+    }
+
+    /// The next scope, or the previous one.
+    pub fn cycle(self, forward: bool) -> Scope {
+        let index = Scope::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        let len = Scope::ALL.len();
+        Scope::ALL[(index + if forward { 1 } else { len - 1 }) % len]
+    }
+}
+
+/// What decides which columns are on screen.
+#[derive(Debug, Clone, Copy)]
+pub struct ColumnQuery<'a> {
+    pub scope: Scope,
+    /// Params that were hidden by hand (`v` / `H`).
+    pub hidden: &'a BTreeSet<String>,
+    /// Keep the columns whose value is the same in every row.
+    pub show_unchanged: bool,
+    /// Words that must all appear in a column's label (case does not matter).
+    pub filter: &'a str,
+}
+
+/// Split a label `file:a.b.leaf` into its group (`file:a.b`, or just `file` when the key has no
+/// dot) and the leaf. Params and metrics that sit side by side in a file share a group.
+pub fn split_group(label: &str) -> (&str, &str) {
+    let key_start = label.find(':').map_or(0, |colon| colon + 1);
+    match label[key_start..].rfind('.') {
+        Some(dot) => (&label[..key_start + dot], &label[key_start + dot + 1..]),
+        None => (
+            label[..key_start].trim_end_matches(':'),
+            &label[key_start..],
+        ),
+    }
+}
+
 impl Column {
+    /// The group a param or metric belongs to (`params.yaml:train`).
+    pub fn group(&self) -> Option<&str> {
+        match self {
+            Column::Param(label) | Column::Metric(label) => Some(split_group(label).0),
+            Column::Name | Column::Duration => None,
+        }
+    }
+
+    /// The header text without the group, which is shown on a line of its own.
+    pub fn short_title(&self) -> &str {
+        match self {
+            Column::Param(label) | Column::Metric(label) => split_group(label).1,
+            other => other.title(),
+        }
+    }
+
     /// The header text.
     pub fn title(&self) -> &str {
         match self {
@@ -242,11 +312,39 @@ fn error_text(error: &Value) -> String {
 impl Table {
     /// `name`, then every param column, then every metric column.
     pub fn columns(&self) -> Vec<Column> {
-        self.columns_hiding(&BTreeSet::new())
+        self.columns_for(&ColumnQuery {
+            scope: Scope::All,
+            hidden: &BTreeSet::new(),
+            show_unchanged: true,
+            filter: "",
+        })
     }
 
-    /// Like [`Table::columns`], without the params whose labels are in `hidden`.
-    pub fn columns_hiding(&self, hidden: &BTreeSet<String>) -> Vec<Column> {
+    /// Does `column` hold different values in different rows? (Always true with fewer than two
+    /// rows: there is nothing to compare, and an empty table would be no help.)
+    fn varies(&self, column: &Column) -> bool {
+        if self.rows.len() < 2 {
+            return true;
+        }
+        let mut texts = self.rows.iter().map(|row| cell_text(row, column));
+        let first = texts.next();
+        texts.any(|text| Some(&text) != first.as_ref())
+    }
+
+    /// The columns on screen: the name, then the params and metrics the query lets through.
+    pub fn columns_for(&self, query: &ColumnQuery) -> Vec<Column> {
+        let words: Vec<String> = query
+            .filter
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        let wanted = |label: &str| {
+            let label = label.to_lowercase();
+            words.iter().all(|word| label.contains(word))
+        };
+        let keep = |column: &Column| query.show_unchanged || self.varies(column);
+        let params = matches!(query.scope, Scope::Params | Scope::All);
+        let metrics = matches!(query.scope, Scope::Metrics | Scope::All);
         std::iter::once(Column::Name)
             // Next to the name, which is always on screen; at the far right it would scroll out of sight.
             .chain(
@@ -258,11 +356,19 @@ impl Table {
             .chain(
                 self.param_columns
                     .iter()
-                    .filter(|label| !hidden.contains(*label))
+                    .filter(|label| params && !query.hidden.contains(*label) && wanted(label))
                     .cloned()
-                    .map(Column::Param),
+                    .map(Column::Param)
+                    .filter(keep),
             )
-            .chain(self.metric_columns.iter().cloned().map(Column::Metric))
+            .chain(
+                self.metric_columns
+                    .iter()
+                    .filter(|label| metrics && wanted(label))
+                    .cloned()
+                    .map(Column::Metric)
+                    .filter(keep),
+            )
             .collect()
     }
 
@@ -538,6 +644,91 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn two() -> Table {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/exp_show/two.json");
+        parse(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn titles(columns: &[Column]) -> Vec<&str> {
+        columns.iter().map(Column::title).collect()
+    }
+
+    fn query<'a>(
+        scope: Scope,
+        show_unchanged: bool,
+        filter: &'a str,
+        hidden: &'a BTreeSet<String>,
+    ) -> ColumnQuery<'a> {
+        ColumnQuery {
+            scope,
+            hidden,
+            show_unchanged,
+            filter,
+        }
+    }
+
+    #[test]
+    fn scope_picks_params_or_metrics_and_unchanged_columns_can_be_left_out() {
+        let table = two();
+        let none = BTreeSet::new();
+        let params = table.columns_for(&query(Scope::Params, true, "", &none));
+        assert_eq!(
+            titles(&params),
+            [
+                "name",
+                "params.yaml:features.scale",
+                "params.yaml:train.epochs",
+                "params.yaml:train.lr"
+            ]
+        );
+        let metrics = table.columns_for(&query(Scope::Metrics, true, "", &none));
+        assert_eq!(
+            titles(&metrics),
+            ["name", "metrics.json:auc", "metrics.json:loss"]
+        );
+        // `features.scale` is 2.0 in every row.
+        let varying = table.columns_for(&query(Scope::Params, false, "", &none));
+        assert_eq!(
+            titles(&varying),
+            ["name", "params.yaml:train.epochs", "params.yaml:train.lr"]
+        );
+    }
+
+    #[test]
+    fn the_filter_wants_every_word_in_the_label_and_ignores_case() {
+        let table = two();
+        let none = BTreeSet::new();
+        let found = table.columns_for(&query(Scope::All, true, "TRAIN lr", &none));
+        assert_eq!(titles(&found), ["name", "params.yaml:train.lr"]);
+        let nothing = table.columns_for(&query(Scope::All, true, "train auc", &none));
+        assert_eq!(titles(&nothing), ["name"]);
+    }
+
+    #[test]
+    fn a_single_row_has_nothing_to_compare_so_nothing_counts_as_unchanged() {
+        let mut table = two();
+        table.rows.truncate(1);
+        let none = BTreeSet::new();
+        let columns = table.columns_for(&query(Scope::Params, false, "", &none));
+        assert_eq!(columns.len(), 4);
+    }
+
+    #[test]
+    fn labels_split_into_a_group_and_the_key_inside_it() {
+        assert_eq!(
+            split_group("params.yaml:train.lr"),
+            ("params.yaml:train", "lr")
+        );
+        assert_eq!(
+            split_group("metrics.json:by_fold.0.mae"),
+            ("metrics.json:by_fold.0", "mae"),
+            "the leaf is the last part of the key"
+        );
+        assert_eq!(split_group("params.yaml:lr"), ("params.yaml", "lr"));
+        assert_eq!(split_group("lr"), ("", "lr"));
+    }
 
     #[test]
     fn nan_and_infinity_become_text_and_strings_are_left_alone() {
