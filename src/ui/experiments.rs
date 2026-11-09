@@ -497,7 +497,7 @@ fn header_color(column: &Column) -> Color {
         Column::Name => theme::TEXT,
         Column::Param(_) => theme::PEACH,
         Column::Metric(_) => theme::GREEN,
-        Column::Duration => theme::SUBTEXT0,
+        Column::Duration | Column::Age => theme::SUBTEXT0,
     }
 }
 
@@ -815,7 +815,7 @@ mod tests {
     #[test]
     fn info_line_names_the_cursor_column_and_row_in_full() {
         let mut app = app_showing(Some(Ok(two())));
-        app.experiments.column = 3; // params.yaml:train.lr
+        app.experiments.column = 4; // params.yaml:train.lr
         app.experiments.row = 3;
         let rows = screen(&app, 150, 14);
         let info = line_with(&rows, "column:");
@@ -841,7 +841,7 @@ mod tests {
     #[test]
     fn narrow_terminals_keep_the_name_column_and_the_cursor_column() {
         let mut app = app_showing(Some(Ok(two())));
-        app.experiments.column = 5; // metrics.json:loss, the last column
+        app.experiments.column = 6; // metrics.json:loss, the last column
         let rows = screen(&app, 30, 14);
         let header = line_with(&rows, "name");
         assert!(header.contains("loss"), "{header}");

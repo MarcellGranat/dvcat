@@ -10,8 +10,9 @@ use std::{
     io,
     path::Path,
     process::{Command, Output, Stdio},
+    sync::OnceLock,
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Deserialize;
@@ -89,14 +90,16 @@ pub enum Column {
     Metric(String),
     /// How long the experiment took; shown only when at least one row has a time.
     Duration,
+    /// How long ago the experiment was made (`3h ago`); shown when a row has a timestamp.
+    Age,
 }
 
 /// Which kind of columns the table shows. Hundreds of params and metrics do not fit one table,
 /// so they are looked at one kind at a time (`Tab` switches).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Scope {
-    #[default]
     Params,
+    #[default]
     Metrics,
     All,
 }
@@ -150,7 +153,7 @@ impl Column {
     pub fn group(&self) -> Option<&str> {
         match self {
             Column::Param(label) | Column::Metric(label) => Some(split_group(label).0),
-            Column::Name | Column::Duration => None,
+            Column::Name | Column::Duration | Column::Age => None,
         }
     }
 
@@ -167,6 +170,7 @@ impl Column {
         match self {
             Column::Name => "name",
             Column::Duration => "run time",
+            Column::Age => "age",
             Column::Param(label) | Column::Metric(label) => label,
         }
     }
@@ -354,6 +358,12 @@ impl Table {
                     .then_some(Column::Duration),
             )
             .chain(
+                self.rows
+                    .iter()
+                    .any(|row| row.timestamp.is_some())
+                    .then_some(Column::Age),
+            )
+            .chain(
                 self.param_columns
                     .iter()
                     .filter(|label| params && !query.hidden.contains(*label) && wanted(label))
@@ -421,6 +431,85 @@ pub fn cell_text(row: &Row, column: &Column) -> String {
             .run_secs
             .map(|secs| format_duration(Duration::from_secs_f64(secs)))
             .unwrap_or_default(),
+        Column::Age => row
+            .timestamp
+            .as_deref()
+            .and_then(local_seconds)
+            .map(|then| ago(then, now_local_seconds()))
+            .unwrap_or_default(),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// How long ago
+// ---------------------------------------------------------------------------------------------
+
+/// DVC writes the commit time as local wall-clock time (`2026-11-09T14:04:13`), without a zone.
+/// So the time is compared with the wall-clock time here, both as seconds since 1970-01-01 00:00
+/// "as if UTC". (Across a change of summer time an age can be an hour off; that is no matter.)
+fn local_seconds(timestamp: &str) -> Option<i64> {
+    let digits = |range: std::ops::Range<usize>| timestamp.get(range)?.parse::<i64>().ok();
+    let (year, month, day) = (digits(0..4)?, digits(5..7)?, digits(8..10)?);
+    let (hour, minute, second) = (digits(11..13)?, digits(14..16)?, digits(17..19)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // Days since 1970-01-01 of a civil date (Howard Hinnant's `days_from_civil`).
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+/// The offset of the local time zone from UTC in seconds, asked of `date` once.
+fn local_offset_seconds() -> i64 {
+    static OFFSET: OnceLock<i64> = OnceLock::new();
+    *OFFSET.get_or_init(|| {
+        let zone = Command::new("date")
+            .arg("+%z")
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .unwrap_or_default();
+        parse_zone_offset(&zone).unwrap_or(0)
+    })
+}
+
+/// `+0100` -> 3600, `-0530` -> -19800.
+fn parse_zone_offset(zone: &str) -> Option<i64> {
+    let sign = match zone.chars().next()? {
+        '+' => 1,
+        '-' => -1,
+        _ => return None,
+    };
+    let hours: i64 = zone.get(1..3)?.parse().ok()?;
+    let minutes: i64 = zone.get(3..5)?.parse().ok()?;
+    Some(sign * (hours * 3_600 + minutes * 60))
+}
+
+fn now_local_seconds() -> i64 {
+    let unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    unix + local_offset_seconds()
+}
+
+/// `then` and `now` in the same clock: `just now`, `5m ago`, `3h ago`, `2d ago`, `3w ago`, `4mo ago`.
+pub fn ago(then: i64, now: i64) -> String {
+    let secs = (now - then).max(0);
+    let (minute, hour, day) = (60, 3_600, 86_400);
+    match secs {
+        s if s < minute => "just now".to_owned(),
+        s if s < hour => format!("{}m ago", s / minute),
+        s if s < day => format!("{}h ago", s / hour),
+        s if s < 14 * day => format!("{}d ago", s / day),
+        s if s < 60 * day => format!("{}w ago", s / (7 * day)),
+        s if s < 730 * day => format!("{}mo ago", s / (30 * day)),
+        s => format!("{}y ago", s / (365 * day)),
     }
 }
 
@@ -544,6 +633,10 @@ fn sort_value(row: &Row, column: &Column) -> Option<SortValue> {
     let value = match column {
         Column::Name => return Some(SortValue::Text(row.label.clone())),
         Column::Duration => return row.run_secs.map(SortValue::Number),
+        Column::Age => {
+            let then = local_seconds(row.timestamp.as_deref()?)?;
+            return Some(SortValue::Number(then as f64));
+        }
         Column::Param(label) => row.params.get(label)?,
         Column::Metric(label) => row.metrics.get(label)?,
     };
@@ -651,8 +744,13 @@ mod tests {
         parse(&fs::read_to_string(path).unwrap()).unwrap()
     }
 
+    /// The titles of the columns, without the age column (its text depends on the clock).
     fn titles(columns: &[Column]) -> Vec<&str> {
-        columns.iter().map(Column::title).collect()
+        columns
+            .iter()
+            .filter(|column| **column != Column::Age)
+            .map(Column::title)
+            .collect()
     }
 
     fn query<'a>(
@@ -728,6 +826,72 @@ mod tests {
         );
         assert_eq!(split_group("params.yaml:lr"), ("params.yaml", "lr"));
         assert_eq!(split_group("lr"), ("", "lr"));
+    }
+
+    #[test]
+    fn timestamps_become_seconds_on_one_clock() {
+        assert_eq!(local_seconds("1970-01-01T00:00:00"), Some(0));
+        assert_eq!(local_seconds("1970-01-02T00:00:01"), Some(86_401));
+        assert_eq!(local_seconds("2000-03-01T00:00:00"), Some(951_868_800));
+        let (a, b) = (
+            local_seconds("2026-11-09T14:04:13").unwrap(),
+            local_seconds("2026-11-09T17:04:13").unwrap(),
+        );
+        assert_eq!(b - a, 3 * 3_600);
+        assert_eq!(local_seconds("garbage"), None);
+        assert_eq!(local_seconds("2026-13-09T14:04:13"), None);
+    }
+
+    #[test]
+    fn ages_use_the_largest_sensible_unit() {
+        let now = 1_000_000_000;
+        let at = |secs: i64| ago(now - secs, now);
+        assert_eq!(at(5), "just now");
+        assert_eq!(
+            at(-30),
+            "just now",
+            "a clock slightly ahead is not the future"
+        );
+        assert_eq!(at(5 * 60), "5m ago");
+        assert_eq!(at(3 * 3_600 + 59), "3h ago");
+        assert_eq!(at(2 * 86_400), "2d ago");
+        assert_eq!(at(21 * 86_400), "3w ago");
+        assert_eq!(at(120 * 86_400), "4mo ago");
+        assert_eq!(at(800 * 86_400), "2y ago");
+    }
+
+    #[test]
+    fn the_zone_offset_of_date_is_read() {
+        assert_eq!(parse_zone_offset("+0100"), Some(3_600));
+        assert_eq!(parse_zone_offset("-0530"), Some(-19_800));
+        assert_eq!(parse_zone_offset(""), None);
+    }
+
+    #[test]
+    fn the_age_column_is_shown_next_to_the_name_and_sorts_by_time() {
+        let table = two();
+        let columns = table.columns();
+        assert_eq!(columns[1], Column::Age);
+        assert!(cell_text(&table.rows[2], &Column::Age).ends_with("ago"));
+        let mut sort = Sort::default();
+        sort.choose(Column::Age);
+        let order: Vec<&str> = table
+            .ordered(&sort)
+            .iter()
+            .filter(|r| r.kind == RowKind::Experiment)
+            .map(|r| r.label.as_str())
+            .collect();
+        let mut by_time = table
+            .rows
+            .iter()
+            .filter(|r| r.kind == RowKind::Experiment)
+            .collect::<Vec<_>>();
+        by_time.sort_by_key(|r| r.timestamp.clone());
+        assert_eq!(
+            order,
+            by_time.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(),
+            "ascending age column: the oldest first"
+        );
     }
 
     #[test]
@@ -843,10 +1007,11 @@ mod tests {
         let table = parse(&sample("two.json")).unwrap();
         let columns = table.columns();
         assert_eq!(columns[0], Column::Name);
-        assert_eq!(columns.len(), 1 + 3 + 2);
-        assert!(matches!(columns[1], Column::Param(_)));
-        assert!(matches!(columns[4], Column::Metric(_)));
-        assert_eq!(columns[1].title(), "params.yaml:features.scale");
+        assert_eq!(columns[1], Column::Age, "right after the name");
+        assert_eq!(columns.len(), 1 + 1 + 3 + 2);
+        assert!(matches!(columns[2], Column::Param(_)));
+        assert!(matches!(columns[5], Column::Metric(_)));
+        assert_eq!(columns[2].title(), "params.yaml:features.scale");
     }
 
     #[test]

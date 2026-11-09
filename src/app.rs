@@ -2797,34 +2797,35 @@ mod experiments_view_tests {
             .experiments
             .columns(table)
             .iter()
+            .filter(|c| **c != experiments::Column::Age)
             .map(|c| c.title().to_owned())
             .collect()
     }
 
     #[test]
-    fn the_table_starts_with_the_params_that_differ_and_tab_walks_the_scopes() {
+    fn the_table_starts_with_the_metrics_and_tab_walks_the_scopes() {
         let mut h = serving_two();
         h.app.experiments.scope = Scope::default();
         h.app.experiments.show_unchanged = false;
         h.press(KeyCode::Char('e'));
         h.wait_for_data();
-        assert_eq!(
-            column_titles(&h),
-            ["name", "params.yaml:train.epochs", "params.yaml:train.lr"]
-        );
-
-        h.app.experiments.column = 2;
-        h.press(KeyCode::Tab);
         assert_eq!(h.app.experiments.scope, Scope::Metrics);
-        assert_eq!(h.app.experiments.column, 0, "the cursor starts over");
         assert_eq!(
             column_titles(&h),
             ["name", "metrics.json:auc", "metrics.json:loss"]
         );
+
+        h.app.experiments.column = 2;
         h.press(KeyCode::Tab);
         assert_eq!(h.app.experiments.scope, Scope::All);
+        assert_eq!(h.app.experiments.column, 0, "the cursor starts over");
         h.press(KeyCode::Tab);
         assert_eq!(h.app.experiments.scope, Scope::Params);
+        // `features.scale` is the same in every row, so it is left out.
+        assert_eq!(
+            column_titles(&h),
+            ["name", "params.yaml:train.epochs", "params.yaml:train.lr"]
+        );
         h.press(KeyCode::BackTab);
         assert_eq!(h.app.experiments.scope, Scope::All);
 
@@ -2858,26 +2859,26 @@ mod experiments_view_tests {
         let mut h = serving_two();
         h.press(KeyCode::Char('e'));
         h.wait_for_data();
-        // name | features.scale | train.epochs train.lr | auc loss (files: params.yaml, metrics.json)
+        // name age | features.scale | train.epochs train.lr | auc loss
         h.press(KeyCode::Char('}'));
         assert_eq!(
-            h.app.experiments.column, 1,
+            h.app.experiments.column, 2,
             "from the name to the first group"
         );
         h.press(KeyCode::Char('}'));
-        assert_eq!(h.app.experiments.column, 2, "train");
+        assert_eq!(h.app.experiments.column, 3, "train");
         h.press(KeyCode::Char('}'));
-        assert_eq!(h.app.experiments.column, 4, "metrics.json");
+        assert_eq!(h.app.experiments.column, 5, "metrics.json");
         h.press(KeyCode::Char('}'));
-        assert_eq!(h.app.experiments.column, 4, "no further group");
+        assert_eq!(h.app.experiments.column, 5, "no further group");
         assert!(h.app.notice.is_some());
+        h.press(KeyCode::Char('{'));
+        assert_eq!(h.app.experiments.column, 3);
         h.press(KeyCode::Char('{'));
         assert_eq!(h.app.experiments.column, 2);
         h.press(KeyCode::Char('{'));
-        assert_eq!(h.app.experiments.column, 1);
-        h.press(KeyCode::Char('{'));
         assert_eq!(
-            h.app.experiments.column, 1,
+            h.app.experiments.column, 2,
             "the first group has none before it"
         );
     }
@@ -3002,7 +3003,10 @@ mod experiments_view_tests {
             h.press(KeyCode::Char('l'));
         }
         assert_eq!(h.app.experiments.row, 3, "4 rows");
-        assert_eq!(h.app.experiments.column, 5, "name + 3 params + 2 metrics");
+        assert_eq!(
+            h.app.experiments.column, 6,
+            "name + age + 3 params + 2 metrics"
+        );
         for _ in 0..20 {
             h.press(KeyCode::Char('k'));
             h.press(KeyCode::Char('h'));
@@ -3015,8 +3019,8 @@ mod experiments_view_tests {
         let mut h = serving_two();
         h.press(KeyCode::Char('e'));
         h.wait_for_data();
-        // Columns: name, features.scale, train.epochs, train.lr, auc, loss.
-        for _ in 0..4 {
+        // Columns: name, age, features.scale, train.epochs, train.lr, auc, loss.
+        for _ in 0..5 {
             h.press(KeyCode::Right);
         }
         let auc = Column::Metric("metrics.json:auc".into());

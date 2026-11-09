@@ -62,7 +62,8 @@ If none is found, pressing `r` explains where it looked.
 | `g`        | show the stage graph (`g` or `Esc` to leave); `h`/`l` follow the edges, `j`/`k` move within a layer, `Enter` opens the stage, `r`/`R` run it |
 | `h` / `l`  | *(experiments)* move the column cursor   |
 | `s`        | *(experiments)* sort by the cursor column; again flips the direction |
-| `Tab` / `Shift+Tab` | *(experiments)* switch between **Params**, **Metrics** and **All**; the title shows which is active and how many columns of how many are on screen. The table starts on the Params that differ between rows |
+| `Tab` / `Shift+Tab` | *(experiments)* switch between **Params**, **Metrics** and **All**; the title shows which is active and how many columns of how many are on screen. The table starts on the Metrics |
+| *(age)*    | *(experiments)* the `age` column next to the name says how long ago each revision was made (`just now`, `5m ago`, `3h ago`, `2d ago`, `3w ago`, `4mo ago`); `s` on it sorts by time, oldest first, then newest first |
 | `u`        | *(experiments)* show / hide the columns that hold the same value in every row (hidden at first) |
 | `/`        | *(experiments)* filter the columns: only labels that contain all the typed words (any case) stay; empty clears it, `Esc` in the table clears it too |
 | `{` / `}`  | *(experiments)* jump to the previous / next group of columns. The line above the headers names the group (`params.yaml:train`, `metrics/accuracy.json:by_fold.0`), the header is the key inside it |
