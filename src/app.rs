@@ -17,7 +17,7 @@ use crate::{
     experiments::{self, RowKind, Sort, Table},
     external,
     files::{self, FileEntry, Preview},
-    form::{ExperimentForm, FormAction},
+    form::{ExperimentForm, FormAction, edit_text},
     graph::{self, Graph},
     history::{self, History, StoredOutcome, StoredRun},
     log::LogBuffer,
@@ -77,6 +77,15 @@ pub struct Confirm {
     pub kill: Vec<u32>,
     /// Options the user can switch on before confirming (each adds `args` to the command).
     pub toggles: Vec<Toggle>,
+    /// A free-text field for more targets (paths, stages, `.dvc` files), when the command takes them.
+    pub targets: Option<Targets>,
+}
+
+/// The text of the targets field of a [`Confirm`]; `p` starts editing it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Targets {
+    pub text: String,
+    pub editing: bool,
 }
 
 /// An option of a [`Confirm`], switched by pressing its key.
@@ -97,7 +106,10 @@ impl Confirm {
         for toggle in self.toggles.iter().filter(|t| t.on) {
             args.extend(toggle.args.iter().cloned());
         }
-        let label = if self.toggles.is_empty() {
+        if let Some(targets) = &self.targets {
+            args.extend(targets.text.split_whitespace().map(str::to_owned));
+        }
+        let label = if self.toggles.is_empty() && self.targets.is_none() {
             self.label.clone()
         } else {
             format!("dvc {}", args.join(" "))
@@ -124,6 +136,7 @@ fn blocked_confirm(blocking: &[external::ExternalRun]) -> Confirm {
         args: Vec::new(),
         kill: blocking.iter().map(|run| run.pid).collect(),
         toggles: Vec::new(),
+        targets: None,
     }
 }
 
@@ -648,7 +661,7 @@ impl App {
             return self.on_stage_form_key(key);
         }
         if self.confirm.is_some() {
-            return self.on_confirm_key(key.code);
+            return self.on_confirm_key(key);
         }
         if self.prompt.is_some() {
             return self.on_prompt_key(key);
@@ -1247,6 +1260,7 @@ impl App {
             args: remotes::transfer_args(transfer, &name),
             kill: Vec::new(),
             toggles,
+            targets: Some(Targets::default()),
         });
     }
 
@@ -1266,6 +1280,7 @@ impl App {
                 args: runner::exp_apply_args(&name),
                 kill: Vec::new(),
                 toggles: Vec::new(),
+                targets: None,
             },
             Action::Remove => Confirm {
                 title: format!("Remove {name}?"),
@@ -1277,6 +1292,7 @@ impl App {
                 args: runner::exp_remove_args(&name),
                 kill: Vec::new(),
                 toggles: Vec::new(),
+                targets: None,
             },
         });
     }
@@ -1369,8 +1385,26 @@ impl App {
         }
     }
 
-    fn on_confirm_key(&mut self, code: KeyCode) -> Vec<Effect> {
-        match code {
+    fn has_targets_field(&self) -> bool {
+        self.confirm.as_ref().is_some_and(|c| c.targets.is_some())
+    }
+
+    fn on_confirm_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        // While the targets field is being edited it takes every key.
+        if let Some(targets) = self
+            .confirm
+            .as_mut()
+            .and_then(|confirm| confirm.targets.as_mut())
+            .filter(|targets| targets.editing)
+        {
+            if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+                targets.editing = false;
+            } else {
+                edit_text(&mut targets.text, key);
+            }
+            return Vec::new();
+        }
+        match key.code {
             KeyCode::Char('y') | KeyCode::Enter => match self.confirm.take() {
                 Some(Confirm { kill, .. }) if !kill.is_empty() => {
                     self.notice = Some("stopping the other dvc process…".to_owned());
@@ -1384,6 +1418,12 @@ impl App {
             },
             KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
                 self.confirm = None;
+                Vec::new()
+            }
+            KeyCode::Char('p') if self.has_targets_field() => {
+                if let Some(targets) = self.confirm.as_mut().and_then(|c| c.targets.as_mut()) {
+                    targets.editing = true;
+                }
                 Vec::new()
             }
             KeyCode::Char(key) => {
@@ -3259,6 +3299,48 @@ mod experiments_view_tests {
         assert_eq!(
             h.app.run.as_ref().unwrap().command_line(),
             format!("dvc {expected}")
+        );
+    }
+
+    #[test]
+    fn p_edits_extra_targets_which_follow_the_other_options() {
+        let mut h = with_remotes("origin\tx\\n", "origin");
+        h.press(KeyCode::Char('P'));
+        wait_for_remotes(&mut h);
+        h.press(KeyCode::Char('p'));
+        // While editing, letters are text: `n`, `q`, `y` and `c` must not answer or toggle.
+        for c in "data/raw yq nc".chars() {
+            h.press(KeyCode::Char(c));
+        }
+        h.press(KeyCode::Backspace);
+        assert!(
+            h.app
+                .confirm
+                .as_ref()
+                .unwrap()
+                .targets
+                .as_ref()
+                .unwrap()
+                .editing
+        );
+        assert!(
+            h.app
+                .confirm
+                .as_ref()
+                .unwrap()
+                .toggles
+                .iter()
+                .all(|t| !t.on)
+        );
+        h.press(KeyCode::Enter); // ends the editing, does not confirm
+        assert!(h.app.run.is_none());
+        h.press(KeyCode::Char('c'));
+        h.press(KeyCode::Enter);
+        wait_until_finished(&mut h);
+        assert!(
+            calls(&h).contains(&"pull -r origin --run-cache data/raw yq n".to_owned()),
+            "{:?}",
+            calls(&h)
         );
     }
 

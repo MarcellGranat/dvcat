@@ -776,7 +776,8 @@ fn render_confirm(confirm: &Confirm, frame: &mut Frame, area: Rect) {
         .iter()
         .map(|line| line.chars().count().div_ceil(inner).max(1))
         .sum::<usize>()
-        + confirm.toggles.len();
+        + confirm.toggles.len()
+        + usize::from(confirm.targets.is_some());
     // text + a blank line + the yes/no line + two border rows
     let height = (wrapped as u16 + 4).min(area.height);
     let popup = Rect::new(
@@ -807,6 +808,26 @@ fn render_confirm(confirm: &Confirm, frame: &mut Frame, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(toggle.text.clone()),
+        ]));
+    }
+    if let Some(targets) = &confirm.targets {
+        let cursor = if targets.editing { "▏" } else { "" };
+        let hint = if targets.editing {
+            "  (Enter: done)"
+        } else if targets.text.is_empty() {
+            "  more paths or stages, space-separated"
+        } else {
+            ""
+        };
+        text.push(Line::from(vec![
+            Span::styled(
+                "    p ",
+                Style::new()
+                    .fg(theme::LAVENDER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("targets: {}{cursor}", targets.text)),
+            Span::styled(hint, theme::muted()),
         ]));
     }
     text.push(Line::from(vec![
@@ -1015,7 +1036,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        app::{Run, RunPhase, Toggle},
+        app::{Run, RunPhase, Targets, Toggle},
         files::Preview,
         runner::RunOutcome,
         test_support::{app_at, app_with_files, demo_app, fixture, with_statuses},
@@ -1557,6 +1578,7 @@ mod tests {
             args: vec![],
             kill: vec![],
             toggles: vec![],
+            targets: None,
         });
         let rows = render(&app, 100, 24);
         let text = rows.join("\n");
@@ -1594,10 +1616,15 @@ mod tests {
                     args: vec![],
                 },
             ],
+            targets: Some(Targets {
+                text: "data/raw".into(),
+                editing: false,
+            }),
         });
         let text = render(&app, 100, 24).join("\n");
         assert!(text.contains("[x] t only the data of stage a"), "{text}");
         assert!(text.contains("[ ] c include the run-cache"), "{text}");
+        assert!(text.contains("p targets: data/raw"), "{text}");
     }
 
     #[test]

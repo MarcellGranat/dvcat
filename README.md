@@ -55,7 +55,7 @@ If none is found, pressing `r` explains where it looked.
 | `R`        | run it with stale upstream stages (`dvc repro`) |
 | `x`        | cancel the running stage (from either view) |
 | `X`        | stop a `dvc` process started outside dvcat (asks first) |
-| `P` / `U`  | `dvc pull` / `dvc push` (from any view). The remotes come from `dvc remote list`: with one it asks yes/no straight away, with several you pick one first (`j`/`k`, `Enter`; the cursor starts on the default). In the question, `t` adds the selected stage as the target (only its data; pipeline and graph views) and `c` adds `--run-cache`. It runs `dvc pull -r NAME [--run-cache] [STAGE]`, shows the log in the pipeline view and re-checks the stage statuses afterwards |
+| `P` / `U`  | `dvc pull` / `dvc push` (from any view). The remotes come from `dvc remote list`: with one it asks yes/no straight away, with several you pick one first (`j`/`k`, `Enter`; the cursor starts on the default). In the question, `t` adds the selected stage as the target (only its data; pipeline and graph views) `c` adds `--run-cache`, and `p` types more targets (paths, stages, `.dvc` files; `Enter` ends the editing). It runs `dvc pull -r NAME [STAGE] [--run-cache] [TARGETS...]`, shows the log in the pipeline view and re-checks the stage statuses afterwards |
 | `PgUp` / `PgDn` | scroll the log                      |
 | `1` `2` `3` `4` | pipeline / graph / experiments / plots view (also `g` for the graph, `e` for the experiments, `p` for the plots) |
 | `e`        | switch between the pipeline and the experiments table |
