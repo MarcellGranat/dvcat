@@ -23,6 +23,7 @@ use crate::{
     params_filter::{ParamPicker, Shown},
     project::{ParamRef, flatten_leaves, param_value},
     prompt::Prompt,
+    remotes::{RemotePicker, Transfer},
     runner::RunOutcome,
     stale::Status,
     theme,
@@ -95,6 +96,7 @@ const PICKER_KEYS: &[(&str, &str)] = &[
     ("a", "show all"),
     ("Esc", "close"),
 ];
+const REMOTE_KEYS: &[(&str, &str)] = &[("j/k", "move"), ("Enter", "choose"), ("Esc", "cancel")];
 const CONFIRM_KEYS: &[(&str, &str)] = &[("y/Enter", "yes"), ("n/Esc", "no")];
 const DAG_KEYS: &[(&str, &str)] = &[
     ("h/l", "upstream/downstream"),
@@ -221,6 +223,14 @@ pub fn view(app: &App, frame: &mut Frame) {
         Some(picker) => {
             render_param_picker(picker, &app.experiments.hidden, frame, main);
             PICKER_KEYS
+        }
+        None => keys,
+    };
+
+    let keys = match &app.remote_picker {
+        Some(picker) => {
+            render_remote_picker(picker, frame, main);
+            REMOTE_KEYS
         }
         None => keys,
     };
@@ -712,6 +722,44 @@ fn render_param_picker(
         .collect();
     let list = List::new(items)
         .block(pane("Params shown in the table", true).border_style(Style::new().fg(theme::PEACH)))
+        .highlight_style(theme::selected())
+        .highlight_symbol("▌ ");
+    let mut state = ListState::default().with_selected(Some(picker.cursor));
+    frame.render_stateful_widget(list, popup, &mut state);
+}
+
+/// The remotes to pull from or push to.
+fn render_remote_picker(picker: &RemotePicker, frame: &mut Frame, area: Rect) {
+    let width = (area.width * 60 / 100).max(40).min(area.width);
+    let height = (picker.remotes.len() as u16 + 2)
+        .clamp(5, area.height.max(5))
+        .min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let items: Vec<ListItem> = picker
+        .remotes
+        .iter()
+        .map(|remote| {
+            let default = if remote.is_default { " (default)" } else { "" };
+            Line::from(vec![
+                Span::raw(remote.name.clone()),
+                Span::styled(default, Style::new().fg(theme::GREEN)),
+                Span::styled(format!("  {}", remote.url), theme::muted()),
+            ])
+            .into()
+        })
+        .collect();
+    let title = match picker.transfer {
+        Transfer::Pull => "Pull from which remote?",
+        Transfer::Push => "Push to which remote?",
+    };
+    let list = List::new(items)
+        .block(pane(title, true).border_style(Style::new().fg(theme::PEACH)))
         .highlight_style(theme::selected())
         .highlight_symbol("▌ ");
     let mut state = ListState::default().with_selected(Some(picker.cursor));

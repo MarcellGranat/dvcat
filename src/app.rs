@@ -27,6 +27,7 @@ use crate::{
     plots::{self, Plot},
     project::{self, DEFAULT_PARAMS_FILE, Project, Stage},
     prompt::{Prompt, PromptAction, PromptKind},
+    remotes::{self, Remote, RemoteChoice, RemotePicker, Transfer},
     runner::{self, Attached, DvcNotFound, KILL_GRACE, RunOutcome, RunRecord, RunningJob},
     stage_form::{self, Pick, StageForm, StageFormAction},
     stale::{self, StageStatus},
@@ -46,6 +47,8 @@ const QUIT_WAIT: Duration = Duration::from_secs(2);
 #[derive(Debug)]
 pub enum Event {
     Key(KeyEvent),
+    /// The remotes found by a background `dvc remote list`, for a pull or a push.
+    Remotes(Transfer, Result<Vec<Remote>, String>),
     /// Result of a background stale check, indexed like `project.stages`.
     Statuses(Vec<StageStatus>),
     /// A chunk of the running command's combined stdout/stderr.
@@ -106,13 +109,6 @@ pub enum Focus {
 enum Action {
     Apply,
     Remove,
-}
-
-/// What `P` / `U` ask about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RemoteAction {
-    Pull,
-    Push,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +196,8 @@ pub enum Effect {
     RefreshStatuses,
     /// Run `dvc exp show --json` in the background.
     FetchExperiments,
+    /// List the remotes in the background, then offer them for a pull or a push.
+    LoadRemotes(Transfer),
     /// Read a project file (path relative to the project root) for the preview popup.
     LoadPreview(String),
     /// Hand a project file to `$EDITOR`. The terminal belongs to `main`, so we only leave a request.
@@ -400,6 +398,7 @@ pub struct App {
     pub prompt: Option<Prompt>,
     /// The open list for hiding param columns; modal like the preview.
     pub param_picker: Option<ParamPicker>,
+    pub remote_picker: Option<RemotePicker>,
     /// The latest finished run of each stage started from this session (DVC keeps no durations).
     pub last_runs: BTreeMap<String, LastRun>,
     /// Seconds each experiment took, by name, for the experiments table.
@@ -445,6 +444,7 @@ impl App {
             external_checked: None,
             prompt: None,
             param_picker: None,
+            remote_picker: None,
             last_runs: BTreeMap::new(),
             experiment_times: BTreeMap::new(),
             persist_history: false,
@@ -571,6 +571,10 @@ impl App {
                 self.notice = None;
                 self.on_key(key)
             }
+            Event::Remotes(transfer, result) => {
+                self.offer_remotes(transfer, result);
+                Vec::new()
+            }
             Event::Statuses(statuses) => {
                 self.statuses = Some(statuses);
                 Vec::new()
@@ -622,6 +626,9 @@ impl App {
         if self.param_picker.is_some() {
             return self.on_picker_key(key);
         }
+        if self.remote_picker.is_some() {
+            return self.on_remote_picker_key(key);
+        }
         // An open popup is modal: it gets every key, so `q` closes it instead of quitting.
         if self.preview.is_some() {
             return self.on_preview_key(key.code);
@@ -651,8 +658,8 @@ impl App {
                 };
                 Vec::new()
             }
-            KeyCode::Char('P') => self.ask_about_remote(RemoteAction::Pull),
-            KeyCode::Char('U') => self.ask_about_remote(RemoteAction::Push),
+            KeyCode::Char('P') => self.request_remotes(Transfer::Pull),
+            KeyCode::Char('U') => self.request_remotes(Transfer::Push),
             // Stopping a run makes sense from either view.
             KeyCode::Char('x') => self.request_cancel(),
             KeyCode::Char('X') => {
@@ -1130,35 +1137,65 @@ impl App {
         self.form = Some(ExperimentForm::from_table(table, row));
     }
 
-    /// `P` / `U`: ask before pulling from or pushing to the DVC remote.
-    fn ask_about_remote(&mut self, action: RemoteAction) -> Vec<Effect> {
+    /// `P` / `U`: look up the remotes; [`App::offer_remotes`] continues when they are known.
+    fn request_remotes(&mut self, transfer: Transfer) -> Vec<Effect> {
         if self.is_running() {
             self.notice = Some("a run is already in progress (x cancels it)".to_owned());
             return Vec::new();
         }
-        self.confirm = Some(match action {
-            RemoteAction::Pull => Confirm {
-                title: "Pull from the DVC remote?".to_owned(),
-                lines: vec![
-                    "Downloads the data that dvc.lock and the .dvc files point at.".into(),
-                    "Workspace files that differ from the cache are overwritten.".into(),
-                ],
-                label: "dvc pull".to_owned(),
-                args: runner::pull_args(),
-                kill: Vec::new(),
-            },
-            RemoteAction::Push => Confirm {
-                title: "Push to the DVC remote?".to_owned(),
-                lines: vec![
-                    "Uploads the cached outputs of dvc.lock and the .dvc files.".into(),
-                    "Other people with access to the remote can then pull them.".into(),
-                ],
-                label: "dvc push".to_owned(),
-                args: runner::push_args(),
-                kill: Vec::new(),
-            },
-        });
+        self.notice = Some("looking up the remotes…".to_owned());
+        vec![Effect::LoadRemotes(transfer)]
+    }
+
+    /// The remotes are known: no remote is an error, one is asked about directly, several are
+    /// listed to choose from.
+    fn offer_remotes(&mut self, transfer: Transfer, result: Result<Vec<Remote>, String>) {
+        self.notice = None;
+        match result {
+            Err(error) => self.notice = Some(error),
+            Ok(remotes) if remotes.is_empty() => {
+                self.notice = Some("no remote is configured (dvc remote add -d NAME URL)".into());
+            }
+            Ok(mut remotes) if remotes.len() == 1 => {
+                self.ask_about_transfer(transfer, remotes.remove(0));
+            }
+            Ok(remotes) => self.remote_picker = Some(RemotePicker::new(transfer, remotes)),
+        }
+    }
+
+    fn on_remote_picker_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if let Some(mut picker) = self.remote_picker.take() {
+            match picker.on_key(key) {
+                RemoteChoice::Continue => self.remote_picker = Some(picker),
+                RemoteChoice::Cancel => {}
+                RemoteChoice::Chosen(remote) => self.ask_about_transfer(picker.transfer, remote),
+            }
+        }
         Vec::new()
+    }
+
+    /// Ask before pulling from or pushing to `remote`.
+    fn ask_about_transfer(&mut self, transfer: Transfer, remote: Remote) {
+        let Remote { name, url, .. } = remote;
+        let (title, what, label) = match transfer {
+            Transfer::Pull => (
+                format!("Pull from {name}?"),
+                "Downloads the data that dvc.lock and the .dvc files point at. Workspace files that differ from the cache are overwritten.",
+                format!("dvc pull -r {name}"),
+            ),
+            Transfer::Push => (
+                format!("Push to {name}?"),
+                "Uploads the cached outputs of dvc.lock and the .dvc files. Other people with access to the remote can then pull them.",
+                format!("dvc push -r {name}"),
+            ),
+        };
+        self.confirm = Some(Confirm {
+            title,
+            lines: vec![format!("Remote {name}: {url}"), what.to_owned()],
+            label,
+            args: remotes::transfer_args(transfer, &name),
+            kill: Vec::new(),
+        });
     }
 
     /// `a` / `d`: ask before applying or removing the experiment under the cursor.
@@ -1597,6 +1634,7 @@ impl App {
                 thread::spawn(move || external::stop(&pids, external::KILL_GRACE));
             }
             Effect::FetchExperiments => self.fetch_experiments(tx),
+            Effect::LoadRemotes(transfer) => self.fetch_remotes(transfer, tx),
             Effect::SaveMessage { rev, message } => {
                 match messages::rewrite(&self.project.root, &rev, &message) {
                     Ok(_) => {
@@ -1664,6 +1702,19 @@ impl App {
             form.error = Some(error);
         } else if let Some(form) = &mut self.stage_form {
             form.error = Some(error);
+        }
+    }
+
+    fn fetch_remotes(&mut self, transfer: Transfer, tx: &Sender<Event>) {
+        let root = self.project.root.clone();
+        match (self.dvc_lookup)(&root) {
+            Ok(dvc) => {
+                let tx = tx.clone();
+                thread::spawn(move || {
+                    let _ = tx.send(Event::Remotes(transfer, remotes::fetch(&dvc, &root)));
+                });
+            }
+            Err(error) => self.dispatch(Event::Remotes(transfer, Err(error.to_string())), tx),
         }
     }
 
@@ -3073,41 +3124,112 @@ mod experiments_view_tests {
         assert_eq!(h.fetch_count(), 2);
     }
 
+    /// A fake `dvc` that knows these remotes (`name<TAB>url` lines) and the default one.
+    fn with_remotes(list: &str, default: &str) -> Harness {
+        let mut h = harness(&format!(
+            "case \"$1 $2\" in\n\
+             \"remote list\") printf '{list}' ;;\n\
+             \"remote default\") echo '{default}' ;;\n\
+             *) echo \"ran $*\" ;;\nesac"
+        ));
+        h.app.view = View::Pipeline;
+        h
+    }
+
+    /// Deliver the background `dvc remote` answer.
+    fn wait_for_remotes(h: &mut Harness) {
+        let event = h.rx.recv_timeout(WAIT).expect("no remotes event");
+        h.app.dispatch(event, &h.tx);
+    }
+
     #[test]
-    fn p_and_u_ask_first_then_run_dvc_pull_and_push() {
+    fn a_single_remote_is_asked_about_directly_and_then_runs() {
         for (key, title, command) in [
-            ('P', "Pull from the DVC remote?", "pull"),
-            ('U', "Push to the DVC remote?", "push"),
+            ('P', "Pull from origin?", "pull"),
+            ('U', "Push to origin?", "push"),
         ] {
-            let mut h = with_table_loaded();
-            h.press(KeyCode::Char(key));
-            assert_eq!(h.app.confirm.as_ref().expect("asks first").title, title);
+            let mut h = with_remotes("origin\ts3://bucket\\n", "origin");
+            let effects = h.press(KeyCode::Char(key));
+            let transfer = if key == 'P' {
+                Transfer::Pull
+            } else {
+                Transfer::Push
+            };
+            assert_eq!(effects, [Effect::LoadRemotes(transfer)]);
+            wait_for_remotes(&mut h);
+            assert!(h.app.remote_picker.is_none());
+            let confirm = h.app.confirm.as_ref().expect("asks first");
+            assert_eq!(confirm.title, title);
+            assert!(confirm.lines[0].contains("s3://bucket"));
             assert!(h.app.run.is_none(), "nothing runs before the answer");
 
             let effects = h.press(KeyCode::Char('y'));
             assert_eq!(effects, [Effect::StartExperiment]);
             let run = h.app.run.as_ref().unwrap();
             assert_eq!(run.kind, RunKind::Remote);
-            assert_eq!(run.command_line(), format!("dvc {command}"));
+            assert_eq!(run.command_line(), format!("dvc {command} -r origin"));
             wait_until_finished(&mut h);
-            assert!(calls(&h).contains(&command.to_owned()));
-            assert!(!h.app.experiments.loading, "the table is not reloaded");
-            assert_eq!(h.fetch_count(), 1);
+            assert!(calls(&h).contains(&format!("{command} -r origin")));
         }
     }
 
     #[test]
-    fn declining_pull_or_push_runs_nothing() {
-        let mut h = with_table_loaded();
+    fn several_remotes_are_listed_and_the_chosen_one_is_used() {
+        let mut h = with_remotes("origin\ts3://a\\nbackup\t/mnt/b\\n", "backup");
         h.press(KeyCode::Char('U'));
+        wait_for_remotes(&mut h);
+        let picker = h.app.remote_picker.as_ref().expect("a list to choose from");
+        assert_eq!(picker.cursor, 1, "starts on the default remote");
+        assert!(h.app.confirm.is_none());
+
+        h.press(KeyCode::Char('k'));
+        h.press(KeyCode::Enter);
+        assert!(h.app.remote_picker.is_none());
+        assert_eq!(h.app.confirm.as_ref().unwrap().title, "Push to origin?");
+        h.press(KeyCode::Char('y'));
+        wait_until_finished(&mut h);
+        assert!(calls(&h).contains(&"push -r origin".to_owned()));
+    }
+
+    #[test]
+    fn no_remote_is_reported_and_declining_runs_nothing() {
+        let mut h = with_remotes("", "");
+        h.press(KeyCode::Char('P'));
+        wait_for_remotes(&mut h);
+        assert!(h.app.confirm.is_none() && h.app.remote_picker.is_none());
+        assert!(h.app.notice.as_ref().unwrap().contains("no remote"));
+
+        let mut h = with_remotes("a\tx\\nb\ty\\n", "");
+        h.press(KeyCode::Char('U'));
+        wait_for_remotes(&mut h);
         h.press(KeyCode::Esc);
-        assert!(h.app.confirm.is_none() && h.app.run.is_none());
-        assert_eq!(calls(&h), ["exp show --json -A"]);
+        assert!(h.app.remote_picker.is_none() && h.app.run.is_none());
+        assert!(!calls(&h).iter().any(|c| c.starts_with("push")));
+    }
+
+    #[test]
+    fn pull_and_push_are_refused_while_something_runs() {
+        let mut h = with_remotes("origin\tx\\n", "origin");
+        h.app.run = Some(Run::experiment(
+            "x".into(),
+            vec!["exp".into(), "run".into()],
+        ));
+        assert!(h.press(KeyCode::Char('P')).is_empty());
+        assert!(
+            h.app
+                .notice
+                .as_ref()
+                .unwrap()
+                .contains("already in progress")
+        );
     }
 
     #[test]
     fn a_remote_run_survives_being_recorded_and_restored() {
-        let run = Run::remote("dvc pull".to_owned(), runner::pull_args());
+        let run = Run::remote(
+            "dvc pull -r origin".to_owned(),
+            remotes::transfer_args(Transfer::Pull, "origin"),
+        );
         assert_eq!(Run::restored(&run.record()).kind, RunKind::Remote);
     }
 

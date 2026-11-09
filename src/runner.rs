@@ -141,16 +141,6 @@ pub fn exp_branch_args(experiment: &str, branch: &str) -> Vec<String> {
         .into()
 }
 
-/// `dvc pull`: download what `dvc.lock` and the `.dvc` files point at from the default remote.
-pub fn pull_args() -> Vec<String> {
-    vec!["pull".to_owned()]
-}
-
-/// `dvc push`: upload the cached outputs to the default remote.
-pub fn push_args() -> Vec<String> {
-    vec!["push".to_owned()]
-}
-
 pub fn exp_remove_args(experiment: &str) -> Vec<String> {
     ["exp", "remove", experiment].map(String::from).into()
 }

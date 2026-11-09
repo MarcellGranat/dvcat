@@ -19,6 +19,7 @@ pub mod plot_form;
 pub mod plots;
 pub mod project;
 pub mod prompt;
+pub mod remotes;
 pub mod runner;
 pub mod stage_form;
 pub mod stale;
