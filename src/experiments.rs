@@ -113,9 +113,37 @@ pub struct Table {
     pub messages: BTreeMap<String, String>,
 }
 
+/// The bare words Python's `json` writes for floats that JSON cannot hold.
+const NON_FINITE: [&str; 3] = ["NaN", "-Infinity", "Infinity"];
+
+/// DVC writes `NaN` and `Infinity` as bare words (Python's `json` does), which is not JSON and
+/// which `serde_json` refuses. Quote them outside strings, so they show as text in the table
+/// (a string is no number, so sorting and deltas skip it).
+fn quote_non_finite(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut rest = json;
+    while let Some(c) = rest.chars().next() {
+        if in_string {
+            in_string = escaped || c != '"';
+            escaped = !escaped && c == '\\';
+        } else if c == '"' {
+            in_string = true;
+        } else if let Some(word) = NON_FINITE.iter().find(|word| rest.starts_with(**word)) {
+            out.push_str(&format!("\"{word}\""));
+            rest = &rest[word.len()..];
+            continue;
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
 /// Parse the output of `dvc exp show --json`.
 pub fn parse(json: &str) -> Result<Table, serde_json::Error> {
-    let revisions: Vec<RawRevision> = serde_json::from_str(json)?;
+    let revisions: Vec<RawRevision> = serde_json::from_str(&quote_non_finite(json))?;
     let mut rows = Vec::new();
     for (position, revision) in revisions.into_iter().enumerate() {
         // The workspace comes first and has no commit name.
@@ -510,6 +538,28 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn nan_and_infinity_become_text_and_strings_are_left_alone() {
+        let quoted = quote_non_finite(
+            r#"{"a": NaN, "b": [-Infinity, Infinity], "c": "NaN \" Infinity", "d": 1.5}"#,
+        );
+        assert_eq!(
+            quoted,
+            r#"{"a": "NaN", "b": ["-Infinity", "Infinity"], "c": "NaN \" Infinity", "d": 1.5}"#
+        );
+        assert!(serde_json::from_str::<serde_json::Value>(&quoted).is_ok());
+    }
+
+    #[test]
+    fn a_nan_metric_does_not_stop_the_table_from_loading() {
+        let json = r#"[{"rev": "workspace", "name": null, "data": {"timestamp": null,
+            "params": {}, "metrics": {"m.json": {"data": {"max_rhat": NaN, "loss": 0.5}}}}}]"#;
+        let table = parse(json).expect("NaN is accepted");
+        let metrics = &table.rows[0].metrics;
+        assert_eq!(metrics["m.json:max_rhat"], json!("NaN"));
+        assert_eq!(metrics["m.json:loss"], json!(0.5));
+    }
 
     #[test]
     fn non_git_failure_explains_how_to_get_experiments() {
