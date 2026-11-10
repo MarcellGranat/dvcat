@@ -127,7 +127,7 @@ impl Scope {
 #[derive(Debug, Clone, Copy)]
 pub struct ColumnQuery<'a> {
     pub scope: Scope,
-    /// Params that were hidden by hand (`v` / `H`).
+    /// Params and metrics that were hidden by hand (`v` / `-`).
     pub hidden: &'a BTreeSet<String>,
     /// Keep the columns whose value is the same in every row.
     pub show_unchanged: bool,
@@ -374,7 +374,7 @@ impl Table {
             .chain(
                 self.metric_columns
                     .iter()
-                    .filter(|label| metrics && wanted(label))
+                    .filter(|label| metrics && !query.hidden.contains(*label) && wanted(label))
                     .cloned()
                     .map(Column::Metric)
                     .filter(keep),
@@ -389,35 +389,48 @@ impl Table {
     /// Rows in display order. Only experiments are reordered, and only within the run of
     /// experiments that belongs to one baseline; the workspace and baselines stay put.
     pub fn ordered(&self, sort: &Sort) -> Vec<&Row> {
-        let Some((column, direction)) = &sort.by else {
-            return self.rows.iter().collect();
+        let shown = |row: &Row| {
+            row.kind != RowKind::Experiment
+                || sort
+                    .only
+                    .as_ref()
+                    .is_none_or(|only| only.contains(&row.rev))
         };
         let mut out: Vec<&Row> = Vec::with_capacity(self.rows.len());
         let mut run: Vec<&Row> = Vec::new();
         for row in &self.rows {
             if row.kind == RowKind::Experiment {
-                run.push(row);
+                if shown(row) {
+                    run.push(row);
+                }
             } else {
-                flush_run(&mut run, &mut out, column, *direction);
+                flush_run(&mut run, &mut out, sort.by.as_ref());
                 out.push(row);
             }
         }
-        flush_run(&mut run, &mut out, column, *direction);
+        flush_run(&mut run, &mut out, sort.by.as_ref());
         out
+    }
+
+    /// The commit ids of the rows whose cell in `column` reads the same as `row`'s.
+    pub fn similar_rows(&self, column: &Column, row: &Row) -> BTreeSet<String> {
+        let wanted = cell_text(row, column);
+        self.rows
+            .iter()
+            .filter(|other| cell_text(other, column) == wanted)
+            .map(|other| other.rev.clone())
+            .collect()
     }
 }
 
 /// Sort a run of experiments and move it to the end of `out`.
 /// The named lifetime `'a` says both vectors hold references into the same table; a closure
 /// cannot state that, which is why this is a function.
-fn flush_run<'a>(
-    run: &mut Vec<&'a Row>,
-    out: &mut Vec<&'a Row>,
-    column: &Column,
-    direction: Direction,
-) {
-    // `sort_by` is stable: rows that compare equal keep the order DVC gave them.
-    run.sort_by(|a, b| compare(sort_value(a, column), sort_value(b, column), direction));
+fn flush_run<'a>(run: &mut Vec<&'a Row>, out: &mut Vec<&'a Row>, by: Option<&(Column, Direction)>) {
+    if let Some((column, direction)) = by {
+        // `sort_by` is stable: rows that compare equal keep the order DVC gave them.
+        run.sort_by(|a, b| compare(sort_value(a, column), sort_value(b, column), *direction));
+    }
     out.append(run);
 }
 
@@ -521,6 +534,163 @@ fn display(value: &Value) -> String {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Focusing on one experiment
+// ---------------------------------------------------------------------------------------------
+
+/// Which way a metric improves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Better {
+    Higher,
+    Lower,
+}
+
+/// Words in a metric's name that say lower is better / higher is better. The second list is asked
+/// first: `mae_skill` improves upwards although `mae` improves downwards.
+const LOWER_IS_BETTER: &[&str] = &[
+    "loss",
+    "error",
+    "err",
+    "mae",
+    "mse",
+    "rmse",
+    "mape",
+    "smape",
+    "crps",
+    "rhat",
+    "divergen",
+    "nll",
+    "perplexity",
+    "deviance",
+    "bias",
+    "latency",
+    "duration",
+];
+const HIGHER_IS_BETTER: &[&str] = &[
+    "skill",
+    "auc",
+    "accuracy",
+    "acc",
+    "f1",
+    "precision",
+    "recall",
+    "r2",
+    "elpd",
+    "ess",
+    "score",
+    "iou",
+];
+
+/// The direction of improvement of the metric `label`, when its name tells. Names that tell
+/// nothing (`coverage_50`: the aim is a value, not a direction) have none, and no row is ever
+/// "the best" in them.
+pub fn better_direction(label: &str) -> Option<Better> {
+    let leaf = split_group(label).1.to_lowercase();
+    let words: Vec<&str> = leaf
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    // A word is a known one, or (for the longer ones) starts with it: `divergences`.
+    let has = |list: &[&str]| {
+        words.iter().any(|word| {
+            list.iter()
+                .any(|known| word == known || (known.len() >= 4 && word.starts_with(known)))
+        })
+    };
+    if has(HIGHER_IS_BETTER) {
+        Some(Better::Higher)
+    } else if has(LOWER_IS_BETTER) {
+        Some(Better::Lower)
+    } else {
+        None
+    }
+}
+
+/// Is `row`'s value of the metric `label` the best of all rows (ties count)? Needs a known
+/// direction and at least two numbers to compare.
+pub fn is_best(table: &Table, row: &Row, label: &str) -> bool {
+    let Some(better) = better_direction(label) else {
+        return false;
+    };
+    let Some(mine) = row.metrics.get(label).and_then(Value::as_f64) else {
+        return false;
+    };
+    let numbers: Vec<f64> = table
+        .rows
+        .iter()
+        .filter_map(|other| other.metrics.get(label).and_then(Value::as_f64))
+        .filter(|number| number.is_finite())
+        .collect();
+    if numbers.len() < 2 || !mine.is_finite() {
+        return false;
+    }
+    let best = numbers.iter().copied().fold(
+        match better {
+            Better::Higher => f64::NEG_INFINITY,
+            Better::Lower => f64::INFINITY,
+        },
+        |best, number| match better {
+            Better::Higher => best.max(number),
+            Better::Lower => best.min(number),
+        },
+    );
+    mine == best
+}
+
+/// One line of the single-experiment view.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FocusField {
+    pub column: Column,
+    pub value: String,
+    /// The baseline's value, when the row has a baseline and the baseline has one.
+    pub baseline: Option<String>,
+    /// How a metric moved from the baseline (numbers only).
+    pub delta: Option<(Change, String)>,
+    /// A param that differs from the baseline's.
+    pub differs: bool,
+    /// The row is the best of all in this metric (see [`is_best`]).
+    pub best: bool,
+}
+
+/// The params and metrics of `columns` that the row at `index` of `rows` has a value for.
+pub fn focus_fields(
+    table: &Table,
+    rows: &[&Row],
+    index: usize,
+    columns: &[Column],
+) -> Vec<FocusField> {
+    let Some(row) = rows.get(index) else {
+        return Vec::new();
+    };
+    let baseline = baseline_of(rows, index);
+    columns
+        .iter()
+        .filter_map(|column| {
+            let (Column::Param(label) | Column::Metric(label)) = column else {
+                return None;
+            };
+            let value = cell_text(row, column);
+            if value.is_empty() {
+                return None;
+            }
+            let baseline_value = baseline
+                .map(|baseline| cell_text(baseline, column))
+                .filter(|text| !text.is_empty());
+            Some(FocusField {
+                column: column.clone(),
+                differs: param_differs(row, baseline, column),
+                delta: match column {
+                    Column::Metric(_) => baseline.and_then(|b| metric_delta(row, b, label)),
+                    _ => None,
+                },
+                best: matches!(column, Column::Metric(_)) && is_best(table, row, label),
+                baseline: baseline_value,
+                value,
+            })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------------
 // Differences from the baseline
 // ---------------------------------------------------------------------------------------------
 
@@ -599,9 +769,13 @@ pub enum Direction {
     Descending,
 }
 
+/// How the rows are ordered, and which experiments are shown at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Sort {
     pub by: Option<(Column, Direction)>,
+    /// When set, only the experiments with these commit ids are shown (the workspace and the
+    /// baselines always are: experiments are compared with them).
+    pub only: Option<BTreeSet<String>>,
 }
 
 impl Sort {
@@ -895,6 +1069,106 @@ mod tests {
     }
 
     #[test]
+    fn the_name_of_a_metric_tells_which_way_it_improves() {
+        let dir = |label| better_direction(label);
+        assert_eq!(dir("metrics.json:loss"), Some(Better::Lower));
+        assert_eq!(dir("m.json:by_fold.0.mae"), Some(Better::Lower));
+        assert_eq!(dir("m.json:max_rhat"), Some(Better::Lower));
+        assert_eq!(dir("m.json:n_divergences"), Some(Better::Lower));
+        assert_eq!(dir("m.json:auc"), Some(Better::Higher));
+        assert_eq!(dir("m.json:min_ess_bulk"), Some(Better::Higher));
+        assert_eq!(dir("m.json:elpd_per_cell"), Some(Better::Higher));
+        assert_eq!(
+            dir("m.json:mae_skill"),
+            Some(Better::Higher),
+            "skill beats mae"
+        );
+        assert_eq!(dir("m.json:crps_skill"), Some(Better::Higher));
+        assert_eq!(
+            dir("m.json:coverage_50"),
+            None,
+            "the aim is a value, not a direction"
+        );
+    }
+
+    #[test]
+    fn the_best_row_in_a_metric_is_found_with_ties_and_only_when_comparable() {
+        let table = two();
+        let by_label = |label: &str| table.rows.iter().find(|r| r.label == label).unwrap();
+        // auc improves upwards: workspace and lr-010 tie at 0.9356.
+        assert!(is_best(&table, by_label("lr-010"), "metrics.json:auc"));
+        assert!(is_best(&table, by_label("workspace"), "metrics.json:auc"));
+        assert!(!is_best(&table, by_label("lr-005"), "metrics.json:auc"));
+        // loss improves downwards.
+        assert!(is_best(&table, by_label("lr-010"), "metrics.json:loss"));
+        assert!(!is_best(&table, by_label("master"), "metrics.json:loss"));
+        // Nothing to compare, or no known direction: no crown.
+        assert!(!is_best(&table, by_label("lr-010"), "metrics.json:missing"));
+        let mut one = two();
+        one.rows.truncate(1);
+        assert!(!is_best(&one, &one.rows[0], "metrics.json:auc"));
+    }
+
+    #[test]
+    fn focus_fields_list_what_the_row_has_with_its_baseline_and_crowns() {
+        let table = two();
+        let rows = table.ordered(&Sort::default());
+        let index = rows.iter().position(|r| r.label == "lr-010").unwrap();
+        let fields = focus_fields(&table, &rows, index, &table.columns());
+        let lr = fields
+            .iter()
+            .find(|f| f.column == Column::Param("params.yaml:train.lr".into()))
+            .unwrap();
+        assert_eq!(
+            (lr.value.as_str(), lr.baseline.as_deref()),
+            ("0.1", Some("0.01"))
+        );
+        assert!(lr.differs && !lr.best);
+        let auc = fields
+            .iter()
+            .find(|f| f.column == Column::Metric("metrics.json:auc".into()))
+            .unwrap();
+        assert!(auc.best);
+        assert!(matches!(&auc.delta, Some((Change::Up, text)) if text.starts_with('+')));
+        // Name and age are not fields.
+        assert!(
+            fields
+                .iter()
+                .all(|f| !matches!(f.column, Column::Name | Column::Age))
+        );
+    }
+
+    #[test]
+    fn similar_rows_share_a_cell_value_and_the_row_filter_keeps_baselines() {
+        let table = two();
+        let row = table.rows.iter().find(|r| r.label == "lr-010").unwrap();
+        let column = Column::Param("params.yaml:train.lr".into());
+        let similar = table.similar_rows(&column, row);
+        let labels: BTreeSet<&str> = table
+            .rows
+            .iter()
+            .filter(|r| similar.contains(&r.rev))
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(labels, BTreeSet::from(["workspace", "lr-010"]));
+
+        let sort = Sort {
+            only: Some(similar),
+            ..Sort::default()
+        };
+        let shown: Vec<&str> = table
+            .ordered(&sort)
+            .iter()
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(
+            shown,
+            ["workspace", "master", "lr-010"],
+            "lr-005 is filtered out"
+        );
+    }
+
+    #[test]
     fn nan_and_infinity_become_text_and_strings_are_left_alone() {
         let quoted = quote_non_finite(
             r#"{"a": NaN, "b": [-Infinity, Infinity], "c": "NaN \" Infinity", "d": 1.5}"#,
@@ -1142,6 +1416,7 @@ mod tests {
     fn sorted(table: &Table, direction: Direction) -> Vec<String> {
         let sort = Sort {
             by: Some((Column::Param("p:v".into()), direction)),
+            ..Sort::default()
         };
         labels(&table.ordered(&sort))
     }
@@ -1215,6 +1490,7 @@ mod tests {
         let table = parse(&sample("two.json")).unwrap();
         let by_auc = |direction| Sort {
             by: Some((Column::Metric("metrics.json:auc".into()), direction)),
+            ..Sort::default()
         };
         let asc = labels(&table.ordered(&by_auc(Direction::Ascending)));
         assert_eq!(asc, ["workspace", "master", "lr-005", "lr-010"]);
@@ -1227,6 +1503,7 @@ mod tests {
         let table = parse(&sample("two.json")).unwrap();
         let sort = Sort {
             by: Some((Column::Name, Direction::Ascending)),
+            ..Sort::default()
         };
         assert_eq!(
             labels(&table.ordered(&sort)),

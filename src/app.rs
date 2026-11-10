@@ -217,6 +217,12 @@ pub struct ExperimentsView {
     pub show_unchanged: bool,
     /// Only columns whose label contains all these words are shown (`/`).
     pub filter: String,
+    /// The rows marked with `Space` or `,` (by commit id, so they survive sorting and reloads).
+    pub selected: BTreeSet<String>,
+    /// The commit id of the experiment shown on its own (`Enter`).
+    pub focus: Option<String>,
+    /// How many lines the single-experiment view is scrolled.
+    pub focus_scroll: usize,
 }
 
 impl ExperimentsView {
@@ -693,6 +699,10 @@ impl App {
             return self.on_preview_key(key.code);
         }
         match key.code {
+            KeyCode::Char('q') if self.focus_open() => {
+                self.experiments.focus = None;
+                Vec::new()
+            }
             KeyCode::Char('q') => {
                 self.should_quit = true;
                 Vec::new()
@@ -1082,7 +1092,14 @@ impl App {
         vec![Effect::FetchExperiments]
     }
 
+    fn focus_open(&self) -> bool {
+        self.view == View::Experiments && self.experiments.focus.is_some()
+    }
+
     fn on_experiments_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        if self.experiments.focus.is_some() {
+            return self.on_focus_key(code);
+        }
         // Transposed, the arrows follow the screen: down/up walk the fields, left/right the experiments.
         let code = match (self.experiments.transpose, code) {
             (true, KeyCode::Char('j')) => KeyCode::Char('l'),
@@ -1124,14 +1141,27 @@ impl App {
             KeyCode::Char('{') => self.jump_group(false),
             KeyCode::Char('}') => self.jump_group(true),
             KeyCode::Char('v') => self.open_param_picker(),
-            KeyCode::Char('H') => self.hide_cursor_param(),
+            KeyCode::Char('-' | 'H') => self.hide_cursor_column(),
+            KeyCode::Char('+') => self.show_hidden_columns(),
+            KeyCode::Char(' ') => self.toggle_row_selection(),
+            KeyCode::Char(',') => self.select_similar_rows(),
+            KeyCode::Char('z') => self.toggle_row_filter(),
+            KeyCode::Enter => self.open_focus(),
             KeyCode::Char('n') => self.open_experiment_form(),
             KeyCode::Char('b') => self.open_branch_prompt(),
             KeyCode::Char('c') => self.open_comment_prompt(),
             KeyCode::Char('a') => self.ask_about_selected_experiment(Action::Apply),
             KeyCode::Char('d') => self.ask_about_selected_experiment(Action::Remove),
             KeyCode::F(5) => return self.request_experiments(),
-            // Esc first drops the filter, then leaves.
+            // Esc undoes one thing at a time: the row filter, the selection, the column filter,
+            // and only then leaves.
+            KeyCode::Esc if self.experiments.sort.only.is_some() => {
+                self.experiments.sort.only = None;
+                self.notice = Some("showing all experiments again".to_owned());
+            }
+            KeyCode::Esc if !self.experiments.selected.is_empty() => {
+                self.experiments.selected.clear();
+            }
             KeyCode::Esc if !self.experiments.filter.is_empty() => {
                 self.experiments.filter.clear();
                 self.experiments.columns_changed();
@@ -1190,20 +1220,163 @@ impl App {
         Vec::new()
     }
 
-    /// `H`: hide the param column under the cursor (`v` brings it back).
-    fn hide_cursor_param(&mut self) {
+    /// `-`: hide the param or metric column under the cursor (`+` brings them all back; `v` picks
+    /// params one by one).
+    fn hide_cursor_column(&mut self) {
         let Some(table) = self.experiments.table() else {
             return;
         };
         match self.experiments.columns(table).get(self.experiments.column) {
-            Some(experiments::Column::Param(label)) => {
+            Some(experiments::Column::Param(label) | experiments::Column::Metric(label)) => {
                 let label = label.clone();
                 self.experiments.hidden.insert(label);
-                self.notice = Some("param hidden; v lists and restores hidden params".to_owned());
+                self.notice = Some("column hidden; + shows the hidden columns again".to_owned());
                 self.save_history();
             }
-            _ => self.notice = Some("H hides the param column under the cursor".to_owned()),
+            _ => {
+                self.notice = Some("- hides the param or metric column under the cursor".to_owned())
+            }
         }
+    }
+
+    fn show_hidden_columns(&mut self) {
+        let count = self.experiments.hidden.len();
+        self.experiments.hidden.clear();
+        self.notice = Some(format!("{count} hidden columns shown again"));
+        self.save_history();
+    }
+
+    /// The row under the cursor, in display order.
+    fn cursor_row(&self) -> Option<&experiments::Row> {
+        let table = self.experiments.table()?;
+        table
+            .ordered(&self.experiments.sort)
+            .get(self.experiments.row)
+            .copied()
+    }
+
+    /// `Space`: mark or unmark the row under the cursor.
+    fn toggle_row_selection(&mut self) {
+        let Some(rev) = self.cursor_row().map(|row| row.rev.clone()) else {
+            return;
+        };
+        if !self.experiments.selected.remove(&rev) {
+            self.experiments.selected.insert(rev);
+        }
+    }
+
+    /// `,`: mark every row that has the same value as the cell under the cursor in its column.
+    fn select_similar_rows(&mut self) {
+        let Some(table) = self.experiments.table() else {
+            return;
+        };
+        let columns = self.experiments.columns(table);
+        let (Some(column), Some(row)) = (columns.get(self.experiments.column), self.cursor_row())
+        else {
+            return;
+        };
+        if matches!(column, experiments::Column::Name) {
+            self.notice = Some(
+                "move onto a param or metric first; , marks the rows that share its value"
+                    .to_owned(),
+            );
+            return;
+        }
+        let similar = table.similar_rows(column, row);
+        let text = experiments::cell_text(row, column);
+        self.notice = Some(format!(
+            "{} rows with {} = {text:?} marked",
+            similar.len(),
+            column.title()
+        ));
+        self.experiments.selected.extend(similar);
+    }
+
+    /// `z`: show only the marked experiments (marking the rows similar to the cell under the
+    /// cursor first, when nothing is marked); again shows all.
+    fn toggle_row_filter(&mut self) {
+        if self.experiments.sort.only.take().is_some() {
+            self.notice = Some("showing all experiments".to_owned());
+            self.clamp_experiments_cursor();
+            return;
+        }
+        if self.experiments.selected.is_empty() {
+            self.select_similar_rows();
+        }
+        if self.experiments.selected.is_empty() {
+            return;
+        }
+        let count = self.experiments.selected.len();
+        self.experiments.sort.only = Some(self.experiments.selected.clone());
+        self.notice = Some(format!(
+            "showing the {count} marked rows (z or Esc shows all)"
+        ));
+        self.experiments.row = 0;
+        self.clamp_experiments_cursor();
+    }
+
+    /// `Enter`: the experiment under the cursor on its own.
+    fn open_focus(&mut self) {
+        let Some(rev) = self.cursor_row().map(|row| row.rev.clone()) else {
+            return;
+        };
+        self.experiments.focus = Some(rev);
+        self.experiments.focus_scroll = 0;
+    }
+
+    /// Keys of the single-experiment view: `j`/`k` scroll, `h`/`l` move to the previous / next row.
+    fn on_focus_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        match code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace => self.experiments.focus = None,
+            KeyCode::Char('j') | KeyCode::Down => self.experiments.focus_scroll += 1,
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.experiments.focus_scroll = self.experiments.focus_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => self.experiments.focus_scroll += PREVIEW_PAGE,
+            KeyCode::PageUp => {
+                self.experiments.focus_scroll =
+                    self.experiments.focus_scroll.saturating_sub(PREVIEW_PAGE);
+            }
+            KeyCode::Home => self.experiments.focus_scroll = 0,
+            KeyCode::Char('h') | KeyCode::Left => self.focus_neighbour(false),
+            KeyCode::Char('l') | KeyCode::Right => self.focus_neighbour(true),
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.experiments.scope = self.experiments.scope.cycle(code == KeyCode::Tab);
+                self.experiments.focus_scroll = 0;
+            }
+            KeyCode::Char('u') => {
+                self.experiments.show_unchanged = !self.experiments.show_unchanged;
+                self.experiments.focus_scroll = 0;
+            }
+            KeyCode::Char('/') => {
+                self.prompt = Some(Prompt::filter(&self.experiments.filter));
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Move the single-experiment view to the row before / after the one shown.
+    fn focus_neighbour(&mut self, forward: bool) {
+        let Some(table) = self.experiments.table() else {
+            return;
+        };
+        let rows = table.ordered(&self.experiments.sort);
+        let Some(at) = rows
+            .iter()
+            .position(|row| Some(&row.rev) == self.experiments.focus.as_ref())
+        else {
+            return;
+        };
+        let next = if forward {
+            (at + 1).min(rows.len() - 1)
+        } else {
+            at.saturating_sub(1)
+        };
+        let rev = rows[next].rev.clone();
+        self.experiments.row = next;
+        self.experiments.focus = Some(rev);
+        self.experiments.focus_scroll = 0;
     }
 
     fn cycle_plot_metric(&mut self, forward: bool) {
@@ -1560,7 +1733,10 @@ impl App {
     /// Keep the cursor on an existing row and column (the table may have shrunk or be absent).
     fn clamp_experiments_cursor(&mut self) {
         let (rows, columns) = self.experiments.table().map_or((0, 0), |table| {
-            (table.rows.len(), self.experiments.columns(table).len())
+            (
+                table.ordered(&self.experiments.sort).len(),
+                self.experiments.columns(table).len(),
+            )
         });
         self.experiments.row = self.experiments.row.min(rows.saturating_sub(1));
         self.experiments.column = self.experiments.column.min(columns.saturating_sub(1));
@@ -2881,6 +3057,130 @@ mod experiments_view_tests {
             h.app.experiments.column, 2,
             "the first group has none before it"
         );
+    }
+
+    /// Put the cursor on `label`'s row and on the column titled `title`.
+    fn cursor_at(h: &mut Harness, label: &str, title: &str) {
+        cursor_on(h, label);
+        let table = h.app.experiments.table().unwrap();
+        h.app.experiments.column = h
+            .app
+            .experiments
+            .columns(table)
+            .iter()
+            .position(|c| c.title() == title)
+            .unwrap();
+    }
+
+    fn shown_labels(h: &Harness) -> Vec<String> {
+        let table = h.app.experiments.table().unwrap();
+        table
+            .ordered(&h.app.experiments.sort)
+            .iter()
+            .map(|r| r.label.clone())
+            .collect()
+    }
+
+    #[test]
+    fn space_marks_rows_and_comma_marks_the_rows_sharing_the_cell_value() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "master");
+        h.press(KeyCode::Char(' '));
+        assert_eq!(h.app.experiments.selected.len(), 1);
+        h.press(KeyCode::Char(' '));
+        assert!(h.app.experiments.selected.is_empty(), "Space toggles");
+
+        cursor_at(&mut h, "lr-010", "params.yaml:train.lr");
+        h.press(KeyCode::Char(','));
+        // workspace and lr-010 both have lr = 0.1.
+        assert_eq!(h.app.experiments.selected.len(), 2);
+        assert!(h.app.notice.as_ref().unwrap().contains("2 rows"));
+    }
+
+    #[test]
+    fn comma_on_the_name_column_explains_itself() {
+        let mut h = with_table_loaded();
+        h.app.experiments.column = 0;
+        h.press(KeyCode::Char(','));
+        assert!(h.app.experiments.selected.is_empty());
+        assert!(h.app.notice.is_some());
+    }
+
+    #[test]
+    fn z_shows_only_the_marked_experiments_and_esc_peels_one_layer_at_a_time() {
+        let mut h = with_table_loaded();
+        cursor_at(&mut h, "lr-010", "params.yaml:train.lr");
+        // Nothing is marked yet: z marks the rows like this cell, then filters.
+        h.press(KeyCode::Char('z'));
+        assert_eq!(shown_labels(&h), ["workspace", "master", "lr-010"]);
+        assert!(h.app.experiments.sort.only.is_some());
+
+        h.press(KeyCode::Char('z'));
+        assert_eq!(shown_labels(&h).len(), 4, "z again shows all");
+        h.press(KeyCode::Char('z'));
+        assert_eq!(shown_labels(&h).len(), 3);
+
+        h.press(KeyCode::Esc); // the row filter
+        assert!(h.app.experiments.sort.only.is_none());
+        assert!(!h.app.experiments.selected.is_empty(), "the marks stay");
+        h.press(KeyCode::Esc); // the marks
+        assert!(h.app.experiments.selected.is_empty());
+        assert_eq!(h.app.view, View::Experiments);
+        h.press(KeyCode::Esc); // and now leaves
+        assert_eq!(h.app.view, View::Pipeline);
+    }
+
+    #[test]
+    fn minus_hides_a_metric_too_and_plus_brings_everything_back() {
+        let mut h = with_table_loaded();
+        cursor_at(&mut h, "lr-010", "metrics.json:auc");
+        h.press(KeyCode::Char('-'));
+        assert!(h.app.experiments.hidden.contains("metrics.json:auc"));
+        assert!(!column_titles(&h).contains(&"metrics.json:auc".to_owned()));
+        cursor_at(&mut h, "lr-010", "params.yaml:train.lr");
+        h.press(KeyCode::Char('-'));
+        assert_eq!(h.app.experiments.hidden.len(), 2);
+        h.press(KeyCode::Char('+'));
+        assert!(h.app.experiments.hidden.is_empty());
+        assert_eq!(column_titles(&h).len(), 6);
+    }
+
+    #[test]
+    fn enter_focuses_one_experiment_and_h_l_walk_the_rows() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "lr-010");
+        h.press(KeyCode::Enter);
+        let lr_010 = h.app.experiments.focus.clone().expect("focused");
+        assert_eq!(
+            h.app
+                .experiments
+                .table()
+                .unwrap()
+                .rows
+                .iter()
+                .find(|r| r.rev == lr_010)
+                .unwrap()
+                .label,
+            "lr-010"
+        );
+        h.press(KeyCode::Char('j'));
+        assert_eq!(h.app.experiments.focus_scroll, 1);
+
+        h.press(KeyCode::Char('h'));
+        assert_eq!(h.app.experiments.row, 1, "master");
+        assert_eq!(h.app.experiments.focus_scroll, 0);
+        h.press(KeyCode::Char('l'));
+        h.press(KeyCode::Char('l'));
+        h.press(KeyCode::Char('l'));
+        assert_eq!(h.app.experiments.row, 3, "stops at the last row");
+
+        // q and Esc close the focus first; q does not quit the program.
+        h.press(KeyCode::Char('q'));
+        assert!(h.app.experiments.focus.is_none() && !h.app.should_quit);
+        h.press(KeyCode::Enter);
+        h.press(KeyCode::Esc);
+        assert!(h.app.experiments.focus.is_none());
+        assert_eq!(h.app.view, View::Experiments);
     }
 
     #[test]

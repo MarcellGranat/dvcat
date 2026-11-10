@@ -67,6 +67,11 @@ If none is found, pressing `r` explains where it looked.
 | `u`        | *(experiments)* show / hide the columns that hold the same value in every row (hidden at first) |
 | `/`        | *(experiments)* filter the columns: only labels that contain all the typed words (any case) stay; empty clears it, `Esc` in the table clears it too |
 | `{` / `}`  | *(experiments)* jump to the previous / next group of columns. The line above the headers names the group (`params.yaml:train`, `metrics/accuracy.json:by_fold.0`), the header is the key inside it |
+| `Space` / `,` | *(experiments)* mark the row under the cursor / mark every row with the same value as the cursor cell (works on any param or metric column, like VisiData's `,`). Marked rows are yellow with a `●` |
+| `z`        | *(experiments)* show only the marked experiments (the workspace and the baselines stay, as the comparison). With nothing marked it marks the rows like the cursor cell first. `z` again shows all |
+| `Esc`      | *(experiments)* undoes one layer at a time: the `z` filter, then the marks, then the `/` column filter, then leaves the view |
+| `-` / `+`  | *(experiments)* hide the param or metric column under the cursor (`H` does the same) / show all hidden columns again |
+| `Enter`    | *(experiments)* focus on the experiment under the cursor: all its params and metrics in a list, grouped, next to the baseline's value and the change. A `♛` marks the metrics in which it is the best of all rows (ties count). `j`/`k` scroll, `h`/`l` show the previous / next row, `Tab`, `/` and `u` work as in the table, `Esc`, `Enter` or `q` go back |
 | `m`        | *(experiments)* show metrics of experiments as differences from their baseline (`▲ +0.1867`) and back |
 | `t`        | *(experiments)* transpose: experiments across the top, params and metrics down the side (`h`/`j`/`k`/`l` follow the screen) |
 | `F5`       | *(experiments)* reload with `dvc exp show --json -A` |
@@ -76,7 +81,6 @@ If none is found, pressing `r` explains where it looked.
 | `b`        | *(experiments)* save the experiment under the cursor as a Git branch (`dvc exp branch`); asks for the name |
 | `p`        | *(experiments)* show / hide a chart of one metric across the experiments |
 | `v`        | *(experiments)* choose which params are shown: a list grouped by file and group (`train.*`); `Space` hides or shows a whole group, `a` shows all, `Esc` closes |
-| `H`        | *(experiments)* hide the param column under the cursor |
 | `[` / `]`  | *(experiments)* previous / next metric in the chart |
 
 **Apply and remove.** `a` runs `dvc exp apply <name>`: it overwrites params, lock file, metrics and outputs in your workspace.
@@ -194,3 +198,7 @@ that adds a new plot to the `plots:` section of `dvc.yaml`, leaving the rest of 
 Supported: `x`, `y` (a field, a list, or `file: fields`), `title`, `x_label`, `y_label` and the templates `linear`,
 `simple`, `scatter`, `smooth` (drawn as a plain line), `bar_horizontal`, `bar_horizontal_sorted`, `confusion` and
 `confusion_normalized`. Images cannot be shown, and revisions are not compared yet (`dvc plots diff`).
+
+### Which metric is "best"?
+
+The crown needs to know which way a metric improves, and DVC does not say. dvcat reads it from the name: `loss`, `error`, `mae`, `mse`, `rmse`, `crps`, `rhat`, `divergences`, `nll`, `bias`, ... improve downwards; `auc`, `accuracy`, `f1`, `precision`, `recall`, `r2`, `elpd`, `ess`, `score`, `skill` (so `mae_skill` improves upwards) improve upwards. A metric whose name tells nothing (`coverage_50`: the aim is a value) never gets a crown.

@@ -15,7 +15,7 @@ use ratatui::{
 use crate::{
     app::{App, ExperimentsView},
     experiments::{
-        Change, Column, Direction, Row, RowKind, Scope, Table, baseline_of, cell_text,
+        self, Change, Column, Direction, Row, RowKind, Scope, Table, baseline_of, cell_text,
         metric_delta, param_differs,
     },
     plot, theme,
@@ -31,6 +31,7 @@ const HINT_NO_MESSAGE: &str =
 const MAX_COLUMN_WIDTH: usize = 28;
 const COLUMN_SPACING: usize = 2;
 const ELLIPSIS: char = '…';
+const CROWN: char = '♛';
 const HINT_NO_EXPERIMENTS: &str =
     "no experiments yet — create one with `dvc exp run -S <param>=<value>`";
 
@@ -69,6 +70,14 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 
 /// The table, with the chart under it when it is switched on.
 fn render_body(view: &ExperimentsView, table: &Table, frame: &mut Frame, inner: Rect) {
+    if let Some(rev) = &view.focus
+        && let Some(index) = table
+            .ordered(&view.sort)
+            .iter()
+            .position(|row| &row.rev == rev)
+    {
+        return render_focus(view, table, index, frame, inner);
+    }
     if view.plot && inner.height >= PLOT_MIN_AREA_HEIGHT {
         let chart_height = (inner.height / 2).min(PLOT_MAX_HEIGHT);
         let [table_area, chart_area] =
@@ -119,6 +128,12 @@ fn title(app: &App) -> String {
     if let Some(table) = app.experiments.table() {
         title.push_str(&scope_summary(&app.experiments, table));
     }
+    if !app.experiments.selected.is_empty() {
+        title.push_str(&format!(" · {} marked", app.experiments.selected.len()));
+    }
+    if app.experiments.sort.only.is_some() {
+        title.push_str(" · only the marked experiments (z)");
+    }
     if app.experiments.transpose {
         title.push_str(" · transposed");
     }
@@ -129,6 +144,154 @@ fn title(app: &App) -> String {
         title.push_str(" · stage run in progress (x cancels; refresh unavailable)");
     }
     title
+}
+
+/// One experiment on its own: every param and metric it has, next to the baseline's value, with
+/// a crown (♛) on the metrics in which it is the best of all rows.
+fn render_focus(
+    view: &ExperimentsView,
+    table: &Table,
+    index: usize,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let rows = table.ordered(&view.sort);
+    let row = rows[index];
+    let columns = view.columns(table);
+    let fields = experiments::focus_fields(table, &rows, index, &columns);
+    let crowns = fields.iter().filter(|field| field.best).count();
+
+    let [head_area, list_area, info_area] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+
+    let kind = match row.kind {
+        RowKind::Workspace => "workspace",
+        RowKind::Baseline => "baseline",
+        RowKind::Experiment => "experiment",
+    };
+    let age = cell_text(row, &Column::Age);
+    let mut first = vec![
+        Span::styled(
+            name_cell(row, false),
+            row_style(row).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  {kind} · {age}"), theme::muted()),
+    ];
+    if crowns > 0 {
+        first.push(Span::styled(
+            format!("   {CROWN} best of all rows in {crowns} metrics"),
+            Style::new().fg(theme::YELLOW).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let baseline =
+        baseline_of(&rows, index).map_or(String::new(), |b| format!("baseline: {}  ·  ", b.label));
+    let message = table.message_of(row).map_or(String::new(), |message| {
+        crate::messages::subject(message).to_owned()
+    });
+    let head = vec![
+        Line::from(first),
+        Line::styled(format!("{baseline}{message}"), theme::muted()),
+        Line::styled(
+            format!(
+                "{CROWN} = the best value of all rows (known only for metrics whose name tells which way is better)  ·  h/l other row  ·  Esc back"
+            ),
+            theme::muted(),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(head), head_area);
+
+    // One line per field, with the group's name above its first field.
+    let key_width = fields
+        .iter()
+        .map(|f| f.column.short_title().chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(MAX_COLUMN_WIDTH);
+    let value_width = fields
+        .iter()
+        .map(|f| f.value.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(MAX_COLUMN_WIDTH);
+    let baseline_width = fields
+        .iter()
+        .filter_map(|f| f.baseline.as_ref())
+        .map(|b| b.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(MAX_COLUMN_WIDTH);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut group = None;
+    for field in &fields {
+        if field.column.group() != group {
+            group = field.column.group();
+            lines.push(Line::styled(
+                format!("▎{}", group.unwrap_or_default()),
+                Style::new()
+                    .fg(header_color(&field.column))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let value_style = if field.differs {
+            Style::new().fg(theme::PEACH).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        let mut spans = vec![
+            Span::raw(format!(
+                "  {:<key_width$}  ",
+                fit(field.column.short_title(), key_width)
+            )),
+            Span::styled(
+                format!("{:<value_width$}", fit(&field.value, value_width)),
+                value_style,
+            ),
+            Span::styled(
+                format!(
+                    "  {:<baseline_width$}",
+                    fit(field.baseline.as_deref().unwrap_or(""), baseline_width)
+                ),
+                theme::muted(),
+            ),
+        ];
+        if let Some((change, text)) = &field.delta {
+            let (arrow, color) = match change {
+                Change::Up => ("▲ ", theme::SAPPHIRE),
+                Change::Down => ("▼ ", theme::MAUVE),
+                Change::Same => ("", theme::OVERLAY1),
+            };
+            spans.push(Span::styled(
+                format!("  {arrow}{text}"),
+                Style::new().fg(color),
+            ));
+        }
+        if field.best {
+            spans.push(Span::styled(
+                format!(" {CROWN}"),
+                Style::new().fg(theme::YELLOW).add_modifier(Modifier::BOLD),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(
+            "nothing to show here: change the scope (Tab), the filter (/) or show unchanged columns (u)",
+            theme::muted(),
+        ));
+    }
+    let scroll = view.focus_scroll.min(lines.len().saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(lines.into_iter().skip(scroll).collect::<Vec<_>>()),
+        list_area,
+    );
+    frame.render_widget(
+        Paragraph::new(format!("{} fields", fields.len())).style(theme::muted()),
+        info_area,
+    );
 }
 
 /// ` · [Params] Metrics All · 7/120 columns · filter "x"`: what is on screen, and how to change it.
@@ -211,7 +374,7 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
                 let (text, style) = body_cell(view, &rows, index, &columns[i]);
                 Cell::from(fit(&text, widths[i])).style(style)
             });
-            TableRow::new(cells).style(row_style(row))
+            TableRow::new(cells).style(marked_style(view, row))
         })
         .collect();
 
@@ -311,7 +474,10 @@ fn render_transposed(view: &ExperimentsView, table: &Table, frame: &mut Frame, a
                 .collect()
         })
         .collect();
-    let headers: Vec<String> = rows.iter().map(|row| name_cell(row)).collect();
+    let headers: Vec<String> = rows
+        .iter()
+        .map(|row| name_cell(row, view.selected.contains(&row.rev)))
+        .collect();
 
     // Index 0 is the field-name column, then one entry per experiment, like `visible_columns` expects.
     let label_width = field_titles
@@ -336,7 +502,7 @@ fn render_transposed(view: &ExperimentsView, table: &Table, frame: &mut Frame, a
         if i == 0 {
             return Cell::from("");
         }
-        let mut style = row_style(rows[i - 1]).add_modifier(Modifier::BOLD);
+        let mut style = marked_style(view, rows[i - 1]).add_modifier(Modifier::BOLD);
         if i - 1 == cursor_row {
             style = style.add_modifier(Modifier::UNDERLINED);
         }
@@ -464,19 +630,32 @@ fn info_line<'a>(
     let hidden = table
         .param_columns
         .iter()
+        .chain(&table.metric_columns)
         .filter(|label| view.hidden.contains(*label))
         .count();
     if hidden > 0 {
-        parts.push(format!("{hidden} params hidden (v)"));
+        let noun = if hidden == 1 { "column" } else { "columns" };
+        parts.push(format!("{hidden} {noun} hidden (+ shows them)"));
     }
     Paragraph::new(parts.join("  ·  ")).style(theme::muted())
 }
 
-fn name_cell(row: &Row) -> String {
+fn name_cell(row: &Row, selected: bool) -> String {
     let warning = if row.error.is_some() { " ⚠" } else { "" };
+    let mark = if selected { "● " } else { "" };
     match row.kind {
-        RowKind::Experiment => format!("└ {}{warning}", row.label),
-        _ => format!("{}{warning}", row.label),
+        RowKind::Experiment => format!("└ {mark}{}{warning}", row.label),
+        _ => format!("{mark}{}{warning}", row.label),
+    }
+}
+
+/// The row's style, in yellow when it is marked.
+fn marked_style(view: &ExperimentsView, row: &Row) -> Style {
+    let style = row_style(row);
+    if view.selected.contains(&row.rev) {
+        style.fg(theme::YELLOW)
+    } else {
+        style
     }
 }
 
@@ -527,7 +706,10 @@ fn body_cell(
 ) -> (String, Style) {
     let row = rows[index];
     if matches!(column, Column::Name) {
-        return (name_cell(row), Style::new());
+        return (
+            name_cell(row, view.selected.contains(&row.rev)),
+            Style::new(),
+        );
     }
     let text = cell_text(row, column);
     let baseline = baseline_of(rows, index);
@@ -789,6 +971,69 @@ mod tests {
     }
 
     #[test]
+    fn the_focused_experiment_shows_its_fields_the_baseline_and_crowns() {
+        let mut app = app_showing(Some(Ok(two())));
+        let table = app.experiments.table().unwrap();
+        let rev = table
+            .rows
+            .iter()
+            .find(|r| r.label == "lr-010")
+            .unwrap()
+            .rev
+            .clone();
+        app.experiments.focus = Some(rev);
+        let rows = screen(&app, 150, 20);
+        let text = rows.join("\n");
+        assert!(
+            text.contains("lr-010") && text.contains("experiment"),
+            "{text}"
+        );
+        assert!(text.contains("baseline: master"), "{text}");
+        assert!(line_with(&rows, "auc").contains('♛'), "{text}");
+        assert!(line_with(&rows, "loss").contains('♛'), "{text}");
+        assert!(!line_with(&rows, "epochs").contains('♛'), "{text}");
+        // The param that changed shows the baseline's value next to it.
+        let lr = line_with(&rows, "lr  ");
+        assert!(lr.contains("0.1") && lr.contains("0.01"), "{lr}");
+
+        // Another experiment is best in nothing.
+        let table = app.experiments.table().unwrap();
+        app.experiments.focus = Some(
+            table
+                .rows
+                .iter()
+                .find(|r| r.label == "lr-005")
+                .unwrap()
+                .rev
+                .clone(),
+        );
+        let text = screen(&app, 150, 20).join("\n");
+        assert!(!text.contains("♛ best of all rows in"), "{text}");
+    }
+
+    #[test]
+    fn marked_rows_get_a_dot_and_the_title_counts_them() {
+        let mut app = app_showing(Some(Ok(two())));
+        let table = app.experiments.table().unwrap();
+        let rev = table
+            .rows
+            .iter()
+            .find(|r| r.label == "lr-005")
+            .unwrap()
+            .rev
+            .clone();
+        app.experiments.selected.insert(rev);
+        let rows = screen(&app, 150, 14);
+        assert!(line_with(&rows, "lr-005").contains("● lr-005"));
+        assert!(line_with(&rows, "marked").contains("╭ Experiments"));
+        assert!(line_with(&rows, "marked").contains("1 marked"));
+        app.experiments.sort.only = Some(app.experiments.selected.clone());
+        let rows = screen(&app, 150, 14);
+        assert!(!rows.join("\n").contains("lr-010"), "filtered out");
+        assert!(line_with(&rows, "marked").contains("only the marked"));
+    }
+
+    #[test]
     fn the_selected_row_is_highlighted() {
         let mut app = app_showing(Some(Ok(two())));
         app.experiments.row = 2; // lr-010
@@ -809,7 +1054,7 @@ mod tests {
         app.experiments.hidden.insert("params.yaml:train.lr".into());
         let rows = screen(&app, 150, 14);
         assert!(rows.join("\n").contains("4/5 columns"), "{rows:?}");
-        assert!(line_with(&rows, "column:").contains("1 params hidden (v)"));
+        assert!(line_with(&rows, "column:").contains("1 column hidden"));
     }
 
     #[test]

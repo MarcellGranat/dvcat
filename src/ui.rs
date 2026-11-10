@@ -119,6 +119,14 @@ const PLOTS_KEYS: &[(&str, &str)] = &[
     ("e", "experiments"),
     ("q", "quit"),
 ];
+const FOCUS_KEYS: &[(&str, &str)] = &[
+    ("j/k", "scroll"),
+    ("h/l", "other row"),
+    ("Tab", "params/metrics"),
+    ("/", "filter"),
+    ("u", "unchanged"),
+    ("Esc", "back"),
+];
 const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("j/k", "row"),
     ("h/l", "column"),
@@ -127,6 +135,10 @@ const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("/", "filter"),
     ("u", "unchanged"),
     ("{ }", "group"),
+    ("Enter", "focus"),
+    ("Space ,", "mark"),
+    ("z", "only marked"),
+    ("-/+", "hide/show col"),
     ("m", "deltas"),
     ("t", "transpose"),
     ("c", "comment"),
@@ -179,7 +191,11 @@ pub fn view(app: &App, frame: &mut Frame) {
         }
         View::Experiments => {
             experiments::render(app, frame, main);
-            EXPERIMENTS_KEYS
+            if app.experiments.focus.is_some() {
+                FOCUS_KEYS
+            } else {
+                EXPERIMENTS_KEYS
+            }
         }
         View::Dag => {
             dag::render(app, frame, main);
