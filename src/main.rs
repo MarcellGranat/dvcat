@@ -15,7 +15,10 @@ use anyhow::{Context, Result};
 use ratatui::{
     DefaultTerminal,
     crossterm::{
-        event::{self, Event as TermEvent, KeyEventKind},
+        event::{
+            self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEventKind,
+            MouseEventKind,
+        },
         execute,
         terminal::{EnterAlternateScreen, enable_raw_mode},
     },
@@ -37,8 +40,19 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        // Harmless when the mouse was never captured.
+        let _ = execute!(stdout(), DisableMouseCapture);
         ratatui::restore();
     }
+}
+
+/// Mouse capture on or off (`mouse: true` in `.dvcat.yaml` turns it on; it takes over text selection).
+fn set_mouse(on: bool) {
+    let _ = if on {
+        execute!(stdout(), EnableMouseCapture)
+    } else {
+        execute!(stdout(), DisableMouseCapture)
+    };
 }
 
 fn main() -> Result<()> {
@@ -68,6 +82,8 @@ fn main() -> Result<()> {
 
 fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<Option<String>> {
     let (tx, rx) = mpsc::channel();
+    let mouse = app.mouse;
+    set_mouse(mouse);
     // While an editor owns the terminal, the key thread must not read (it would steal keystrokes).
     // An `Arc<AtomicBool>` is a flag both threads can see; `Arc` shares ownership, the atomic
     // makes reading and writing it safe without a lock.
@@ -88,11 +104,11 @@ fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<Option<String>> {
             Err(RecvTimeoutError::Disconnected) => break, // the key thread died
         }
         if let Some(path) = app.editor_request.take() {
-            let result = open_in_editor(terminal, &paused, &path);
+            let result = open_in_editor(terminal, &paused, &path, mouse);
             app.editor_closed(result.err(), &tx);
         }
         if let Some(request) = app.pick_request.take() {
-            let result = pick_with_fzf(terminal, &paused, &request);
+            let result = pick_with_fzf(terminal, &paused, &request, mouse);
             app.file_picked(request.target, result);
         }
     }
@@ -106,6 +122,7 @@ fn open_in_editor(
     terminal: &mut DefaultTerminal,
     paused: &AtomicBool,
     path: &Path,
+    mouse: bool,
 ) -> Result<(), String> {
     let command = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
@@ -117,10 +134,12 @@ fn open_in_editor(
     paused.store(true, Ordering::SeqCst);
     // Let a key-thread poll that is already in flight finish before the editor starts reading.
     thread::sleep(KEY_POLL * 2);
+    set_mouse(false);
     ratatui::restore();
     let status = Command::new(program).args(words).arg(path).status();
     // Back to raw mode and the alternate screen; the old frame is stale, so clear it.
     let back = enable_raw_mode().and_then(|()| execute!(stdout(), EnterAlternateScreen));
+    set_mouse(mouse);
     paused.store(false, Ordering::SeqCst);
     back.map_err(|error| format!("cannot restore the terminal: {error}"))?;
     let _ = terminal.clear();
@@ -138,9 +157,11 @@ fn pick_with_fzf(
     terminal: &mut DefaultTerminal,
     paused: &AtomicBool,
     request: &PickRequest,
+    mouse: bool,
 ) -> Result<Vec<String>, String> {
     paused.store(true, Ordering::SeqCst);
     thread::sleep(KEY_POLL * 2);
+    set_mouse(false);
     ratatui::restore();
     // fzf draws on the terminal itself; only its answer comes back through the pipe.
     let mut command = Command::new("fzf");
@@ -186,6 +207,7 @@ fn pick_with_fzf(
         Err(error) => Err(format!("cannot start fzf: {error}")),
     };
     let back = enable_raw_mode().and_then(|()| execute!(stdout(), EnterAlternateScreen));
+    set_mouse(mouse);
     paused.store(false, Ordering::SeqCst);
     back.map_err(|error| format!("cannot restore the terminal: {error}"))?;
     let _ = terminal.clear();
@@ -210,10 +232,22 @@ fn spawn_key_thread(tx: Sender<Event>, paused: Arc<AtomicBool>) {
                 break;
             };
             // Some terminals report both press and release; only act on presses.
-            if let TermEvent::Key(key) = term_event
-                && key.kind == KeyEventKind::Press
-                && tx.send(Event::Key(key)).is_err()
-            {
+            let sent = match term_event {
+                TermEvent::Key(key) if key.kind == KeyEventKind::Press => tx.send(Event::Key(key)),
+                // Mouse capture also reports every movement; only clicks and the wheel matter.
+                TermEvent::Mouse(mouse)
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::Down(_)
+                            | MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                    ) =>
+                {
+                    tx.send(Event::Mouse(mouse))
+                }
+                _ => Ok(()),
+            };
+            if sent.is_err() {
                 break; // receiver is gone: the app is shutting down
             }
         }

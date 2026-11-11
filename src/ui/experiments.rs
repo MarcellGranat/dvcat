@@ -521,6 +521,18 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
     let mut state = TableState::default().with_selected(Some(view.row));
     frame.render_stateful_widget(widget, table_area, &mut state);
 
+    // Remember where everything was drawn, for the mouse.
+    view.hits.table.set(table_area);
+    view.hits.table_offset.set(state.offset());
+    let mut x = table_area.x;
+    let mut spans = Vec::with_capacity(shown.len());
+    for &i in &shown {
+        let width = widths[i] as u16;
+        spans.push((x, x + width, i));
+        x += width + COLUMN_SPACING as u16;
+    }
+    *view.hits.columns.borrow_mut() = spans;
+
     let info = info_line(view, table, &columns[cursor_column], &rows);
     frame.render_widget(info, info_area);
 }
@@ -1084,6 +1096,56 @@ mod tests {
     }
 
     // ---- the screen ----
+
+    fn mouse(
+        kind: ratatui::crossterm::event::MouseEventKind,
+        column: u16,
+        row: u16,
+    ) -> crate::app::Event {
+        crate::app::Event::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn clicks_move_the_cursor_and_sort_by_a_clicked_header_and_the_wheel_scrolls() {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = app_showing(Some(Ok(two())));
+        app.mouse = true;
+        let rows = screen(&app, 150, 14); // draws once, so the table knows where it is
+        let header_row = rows.iter().position(|r| r.contains("name")).unwrap() as u16;
+        let auc_x = rows[usize::from(header_row)].find("auc").unwrap() as u16;
+
+        // A click on the third body row puts the cursor there.
+        app.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            header_row + 3,
+        ));
+        assert_eq!(app.experiments.row, 2);
+        // A click on a header sorts by that column.
+        app.update(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            auc_x,
+            header_row,
+        ));
+        assert!(
+            matches!(&app.experiments.sort.by, Some((Column::Metric(l), _)) if l.ends_with("auc")),
+            "{:?}",
+            app.experiments.sort.by
+        );
+        // The wheel moves the cursor like the arrow keys.
+        app.update(mouse(MouseEventKind::ScrollUp, 0, 0));
+        assert_eq!(app.experiments.row, 1);
+
+        // Without `mouse: true` nothing happens.
+        app.mouse = false;
+        app.update(mouse(MouseEventKind::ScrollDown, 0, 0));
+        assert_eq!(app.experiments.row, 1);
+    }
 
     #[test]
     fn table_lists_workspace_baseline_then_experiments_with_param_and_metric_columns() {

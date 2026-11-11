@@ -578,7 +578,9 @@ fn render_stage_list(app: &App, frame: &mut Frame, area: Rect) {
         .highlight_symbol("▌ ");
     // ListState is a small scratch value rebuilt each frame from our own state.
     let mut state = ListState::default().with_selected(Some(app.selected));
+    app.experiments.hits.stages.set(area);
     frame.render_stateful_widget(list, area, &mut state);
+    app.experiments.hits.stages_offset.set(state.offset());
 }
 
 fn render_files(app: &App, files: &[FileEntry], frame: &mut Frame, area: Rect) {

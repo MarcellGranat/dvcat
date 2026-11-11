@@ -9,7 +9,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::{
     dag::{self, Layout, Move},
@@ -48,6 +50,8 @@ const QUIT_WAIT: Duration = Duration::from_secs(2);
 #[derive(Debug)]
 pub enum Event {
     Key(KeyEvent),
+    /// A click or the wheel (only with `mouse: true` in the config).
+    Mouse(MouseEvent),
     /// The remotes found by a background `dvc remote list`, for a pull or a push.
     Remotes(Transfer, Result<Vec<Remote>, String>),
     /// Result of a background stale check, indexed like `project.stages`.
@@ -196,6 +200,21 @@ pub struct PlotsView {
     pub definition: bool,
 }
 
+/// Where the last frame drew things the mouse can hit. Written while drawing (hence the cells:
+/// drawing only has `&App`), read when a click arrives.
+#[derive(Debug, Default)]
+pub struct Hits {
+    /// The experiments table including its header line.
+    pub table: std::cell::Cell<ratatui::layout::Rect>,
+    /// The first body row that is on screen (the table scrolls to keep the cursor in view).
+    pub table_offset: std::cell::Cell<usize>,
+    /// `(first x, one past the last x, index into the shown columns)` of each drawn column.
+    pub columns: std::cell::RefCell<Vec<(u16, u16, usize)>>,
+    /// The stage list, and the first stage that is on screen.
+    pub stages: std::cell::Cell<ratatui::layout::Rect>,
+    pub stages_offset: std::cell::Cell<usize>,
+}
+
 /// Everything the experiments view needs to remember.
 #[derive(Debug, Default)]
 pub struct ExperimentsView {
@@ -228,6 +247,7 @@ pub struct ExperimentsView {
     pub focus: Option<String>,
     /// How many lines the single-experiment view is scrolled.
     pub focus_scroll: usize,
+    pub hits: Hits,
     /// Columns kept at the left whatever the scope or the scrolling (`f`), by label.
     pub pinned: BTreeSet<String>,
     /// Show every numbered metric (`by_fold.0`, ...) on its own instead of one sparkline (`F`).
@@ -799,6 +819,10 @@ impl App {
                 self.notice = None;
                 self.on_key(key)
             }
+            Event::Mouse(mouse) => {
+                self.notice = None;
+                self.on_mouse(mouse)
+            }
             Event::Remotes(transfer, result) => {
                 self.offer_remotes(transfer, result);
                 Vec::new()
@@ -918,6 +942,85 @@ impl App {
                 View::Plots => self.on_plots_key(code),
             },
         }
+    }
+
+    /// The wheel moves like the arrow keys; a click on the experiments table or the stage list
+    /// puts the cursor there (a click on a header also sorts by it).
+    fn on_mouse(&mut self, mouse: MouseEvent) -> Vec<Effect> {
+        if !self.mouse {
+            return Vec::new();
+        }
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        match mouse.kind {
+            MouseEventKind::ScrollUp => return self.on_key(press(KeyCode::Up)),
+            MouseEventKind::ScrollDown => return self.on_key(press(KeyCode::Down)),
+            MouseEventKind::Down(MouseButton::Left) => {}
+            _ => return Vec::new(),
+        }
+        let modal = self.form.is_some()
+            || self.plot_form.is_some()
+            || self.stage_form.is_some()
+            || self.confirm.is_some()
+            || self.prompt.is_some()
+            || self.param_picker.is_some()
+            || self.remote_picker.is_some()
+            || self.palette.is_some()
+            || self.preview.is_some();
+        if modal {
+            return Vec::new();
+        }
+        let (x, y) = (mouse.column, mouse.row);
+        let inside = |area: ratatui::layout::Rect| {
+            x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height
+        };
+        match self.view {
+            View::Experiments
+                if self.experiments.focus.is_none()
+                    && self.experiments.compare.is_none()
+                    && !self.experiments.transpose =>
+            {
+                let area = self.experiments.hits.table.get();
+                if !inside(area) {
+                    return Vec::new();
+                }
+                let column = self
+                    .experiments
+                    .hits
+                    .columns
+                    .borrow()
+                    .iter()
+                    .find(|(from, to, _)| x >= *from && x < *to)
+                    .map(|(_, _, index)| *index);
+                if let Some(column) = column {
+                    self.experiments.column = column;
+                }
+                if y == area.y {
+                    self.sort_by_cursor_column();
+                } else {
+                    let offset = self.experiments.hits.table_offset.get();
+                    self.experiments.row = offset + usize::from(y - area.y - 1);
+                }
+                self.clamp_experiments_cursor();
+            }
+            View::Pipeline => {
+                let area = self.experiments_free_stage_area();
+                if inside(area) && y > area.y {
+                    let index =
+                        self.experiments.hits.stages_offset.get() + usize::from(y - area.y - 1);
+                    if index < self.stage_count() {
+                        self.selected = index;
+                        self.file_cursor = 0;
+                        self.focus = Focus::Stages;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn experiments_free_stage_area(&self) -> ratatui::layout::Rect {
+        self.experiments.hits.stages.get()
     }
 
     /// Which group of actions the palette lists for the current screen.
