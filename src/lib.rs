@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod config;
 pub mod dag;
 pub mod dvc_yaml;
 pub mod expand;

@@ -75,6 +75,9 @@ pub struct History {
     /// Param columns hidden in the experiments table.
     #[serde(default)]
     pub hidden_params: BTreeSet<String>,
+    /// Metric label -> `lower` / `higher`, as set with `B`.
+    #[serde(default)]
+    pub directions: BTreeMap<String, String>,
 }
 
 fn path(root: &Path) -> PathBuf {

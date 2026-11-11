@@ -226,6 +226,8 @@ pub struct ExperimentsView {
     pub focus: Option<String>,
     /// How many lines the single-experiment view is scrolled.
     pub focus_scroll: usize,
+    /// The two commit ids shown side by side (`=`); the scroll is `focus_scroll`.
+    pub compare: Option<(String, String)>,
 }
 
 impl ExperimentsView {
@@ -469,7 +471,11 @@ pub struct App {
     pub remote_picker: Option<RemotePicker>,
     /// The open command palette / key help.
     pub palette: Option<Palette>,
+    /// Which way metrics improve where the name does not say: the config file, then `B`.
+    pub directions: BTreeMap<String, experiments::Better>,
     pub theme: crate::theme::Mode,
+    /// Mouse input is on (`mouse: true` in `.dvcat.yaml`).
+    pub mouse: bool,
     /// Every notice of this session, oldest first (`:messages`).
     pub messages: Vec<String>,
     notice_seen: Option<String>,
@@ -523,7 +529,9 @@ impl App {
             param_picker: None,
             remote_picker: None,
             palette: None,
+            directions: BTreeMap::new(),
             theme: crate::theme::Mode::default(),
+            mouse: false,
             messages: Vec::new(),
             notice_seen: None,
             notice_since: None,
@@ -538,6 +546,20 @@ impl App {
             notice: None,
             dvc_lookup: runner::find_dvc_in_env,
             should_quit: false,
+        }
+    }
+
+    /// Take the settings of `.dvcat.yaml`; call before [`App::enable_history`], so what the user
+    /// set with `B` wins over the file.
+    pub fn apply_config(&mut self, config: &crate::config::Config) {
+        if let Some(mode) = config.theme {
+            self.theme = mode;
+        }
+        self.mouse = config.mouse;
+        self.directions.extend(config.better.clone());
+        if !config.problems.is_empty() {
+            self.notice = Some(config.problems.join("; "));
+            self.track_notice();
         }
     }
 
@@ -556,6 +578,11 @@ impl App {
         }
         self.experiment_times.extend(remembered.experiments);
         self.experiments.hidden = remembered.hidden_params;
+        for (label, name) in remembered.directions {
+            if let Some(better) = experiments::Better::parse(&name) {
+                self.directions.insert(label, better);
+            }
+        }
         self.persist_history = true;
     }
 
@@ -581,6 +608,11 @@ impl App {
             stages,
             experiments: self.experiment_times.clone(),
             hidden_params: self.experiments.hidden.clone(),
+            directions: self
+                .directions
+                .iter()
+                .map(|(label, better)| (label.clone(), better.name().to_owned()))
+                .collect(),
         };
         // A history that cannot be written is not worth interrupting the user for.
         let _ = history::save(&self.project.root, &history);
@@ -695,6 +727,7 @@ impl App {
             Event::Experiments(mut result) => {
                 if let Ok(table) = &mut result {
                     self.apply_experiment_times(table);
+                    table.directions.clone_from(&self.directions);
                 }
                 self.experiments.loading = false;
                 self.experiments.data = Some(result);
@@ -749,6 +782,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') if self.focus_open() => {
                 self.experiments.focus = None;
+                self.experiments.compare = None;
                 Vec::new()
             }
             KeyCode::Char('q') => {
@@ -1204,10 +1238,14 @@ impl App {
     }
 
     fn focus_open(&self) -> bool {
-        self.view == View::Experiments && self.experiments.focus.is_some()
+        self.view == View::Experiments
+            && (self.experiments.focus.is_some() || self.experiments.compare.is_some())
     }
 
     fn on_experiments_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        if self.experiments.compare.is_some() {
+            return self.on_compare_key(code);
+        }
         if self.experiments.focus.is_some() {
             return self.on_focus_key(code);
         }
@@ -1258,6 +1296,9 @@ impl App {
             KeyCode::Char(',') => self.select_similar_rows(),
             KeyCode::Char('z') => self.toggle_row_filter(),
             KeyCode::Enter => self.open_focus(),
+            KeyCode::Char('=') => self.open_compare(),
+            KeyCode::Char('T') => self.open_best_prompt(),
+            KeyCode::Char('B') => self.cycle_direction(),
             KeyCode::Char('n') => self.open_experiment_form(),
             KeyCode::Char('b') => self.open_branch_prompt(),
             KeyCode::Char('c') => self.open_comment_prompt(),
@@ -1433,6 +1474,140 @@ impl App {
         };
         self.experiments.focus = Some(rev);
         self.experiments.focus_scroll = 0;
+    }
+
+    /// `=`: two rows side by side, showing only what differs. Two marked rows, or one marked row
+    /// and the row under the cursor.
+    fn open_compare(&mut self) {
+        let marked: Vec<String> = self.experiments.selected.iter().cloned().collect();
+        let cursor = self.cursor_row().map(|row| row.rev.clone());
+        let pair = match (marked.as_slice(), cursor) {
+            ([a, b], _) => Some((a.clone(), b.clone())),
+            ([a], Some(c)) if *a != c => Some((a.clone(), c)),
+            _ => None,
+        };
+        match pair {
+            Some(pair) => {
+                self.experiments.compare = Some(pair);
+                self.experiments.focus_scroll = 0;
+            }
+            None => {
+                self.notice = Some(
+                    "mark two rows (Space) first, or mark one and move the cursor to another"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+
+    /// Keys of the comparison: `j`/`k` scroll; `Tab`, `u` and `/` change which fields are listed.
+    fn on_compare_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        match code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace | KeyCode::Char('=') => {
+                self.experiments.compare = None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => self.experiments.focus_scroll += 1,
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.experiments.focus_scroll = self.experiments.focus_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => self.experiments.focus_scroll += PREVIEW_PAGE,
+            KeyCode::PageUp => {
+                self.experiments.focus_scroll =
+                    self.experiments.focus_scroll.saturating_sub(PREVIEW_PAGE);
+            }
+            KeyCode::Home => self.experiments.focus_scroll = 0,
+            KeyCode::Char('x') => {
+                // Swap the two sides.
+                if let Some((a, b)) = self.experiments.compare.take() {
+                    self.experiments.compare = Some((b, a));
+                }
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.experiments.scope = self.experiments.scope.cycle(code == KeyCode::Tab);
+                self.experiments.focus_scroll = 0;
+            }
+            KeyCode::Char('u') => {
+                self.experiments.show_unchanged = !self.experiments.show_unchanged;
+                self.experiments.focus_scroll = 0;
+            }
+            KeyCode::Char('/') => {
+                self.prompt = Some(Prompt::filter(&self.experiments.filter));
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// The label of the metric column under the cursor.
+    fn cursor_metric(&self) -> Option<String> {
+        let table = self.experiments.table()?;
+        match self.experiments.columns(table).get(self.experiments.column) {
+            Some(experiments::Column::Metric(label)) => Some(label.clone()),
+            _ => None,
+        }
+    }
+
+    /// `T`: mark the best N rows of the metric under the cursor.
+    fn open_best_prompt(&mut self) {
+        let Some(label) = self.cursor_metric() else {
+            self.notice = Some("move onto a metric column first; T marks its best rows".to_owned());
+            return;
+        };
+        let known = self
+            .experiments
+            .table()
+            .is_some_and(|table| table.direction_of(&label).is_some());
+        if !known {
+            self.notice = Some(format!(
+                "which way does {label} improve? press B to say (lower or higher)"
+            ));
+            return;
+        }
+        self.prompt = Some(Prompt::best(&label));
+    }
+
+    fn mark_best_rows(&mut self, label: &str, count: usize) {
+        let Some(table) = self.experiments.table() else {
+            return;
+        };
+        let best = table.best_rows(label, count);
+        self.notice = Some(format!("{} best rows of {label} marked", best.len()));
+        self.experiments.selected.extend(best);
+    }
+
+    /// `B`: which way the metric under the cursor improves: by its name, lower, or higher.
+    fn cycle_direction(&mut self) {
+        let Some(label) = self.cursor_metric() else {
+            self.notice =
+                Some("move onto a metric column first; B sets which way it improves".to_owned());
+            return;
+        };
+        let next = match self.directions.get(&label) {
+            None => Some(experiments::Better::Lower),
+            Some(experiments::Better::Lower) => Some(experiments::Better::Higher),
+            Some(experiments::Better::Higher) => None,
+        };
+        match next {
+            Some(better) => {
+                self.directions.insert(label.clone(), better);
+                self.notice = Some(format!("{label}: {} is better", better.name()));
+            }
+            None => {
+                self.directions.remove(&label);
+                self.notice = Some(format!(
+                    "{label}: the better direction is read from its name again"
+                ));
+            }
+        }
+        self.apply_directions();
+        self.save_history();
+    }
+
+    /// Hand the metric directions (config + `B`) to the loaded table.
+    fn apply_directions(&mut self) {
+        if let Some(Ok(table)) = &mut self.experiments.data {
+            table.directions.clone_from(&self.directions);
+        }
     }
 
     /// Keys of the single-experiment view: `j`/`k` scroll, `h`/`l` move to the previous / next row.
@@ -1703,6 +1878,12 @@ impl App {
                     self.prompt = None;
                     self.experiments.filter = text;
                     self.experiments.columns_changed();
+                    return Vec::new();
+                }
+                if let PromptKind::Best { label } = prompt.kind.clone() {
+                    self.prompt = None;
+                    let count = text.parse().unwrap_or(1);
+                    self.mark_best_rows(&label, count);
                     return Vec::new();
                 }
                 if let PromptKind::Comment { rev } = prompt.kind.clone() {
@@ -3214,6 +3395,77 @@ mod experiments_view_tests {
         // workspace and lr-010 both have lr = 0.1.
         assert_eq!(h.app.experiments.selected.len(), 2);
         assert!(h.app.notice.as_ref().unwrap().contains("2 rows"));
+    }
+
+    #[test]
+    fn t_marks_the_best_rows_of_the_metric_and_b_sets_the_direction() {
+        let mut h = with_table_loaded();
+        cursor_at(&mut h, "lr-010", "metrics.json:auc");
+        h.press(KeyCode::Char('T'));
+        assert!(h.app.prompt.is_some());
+        h.press(KeyCode::Enter); // the default: 5 rows
+        assert!(h.app.experiments.selected.len() >= 2);
+
+        // Flip the direction: the other end of the metric is now the best.
+        h.app.experiments.selected.clear();
+        h.press(KeyCode::Char('B'));
+        assert_eq!(
+            h.app.directions["metrics.json:auc"],
+            experiments::Better::Lower
+        );
+        let table = h.app.experiments.table().unwrap();
+        assert_eq!(
+            table.direction_of("metrics.json:auc"),
+            Some(experiments::Better::Lower)
+        );
+        h.press(KeyCode::Char('B'));
+        h.press(KeyCode::Char('B')); // back to reading the name
+        assert!(h.app.directions.is_empty());
+    }
+
+    #[test]
+    fn t_on_a_metric_without_a_known_direction_asks_for_one() {
+        let mut h = with_table_loaded();
+        cursor_at(&mut h, "lr-010", "metrics.json:auc");
+        h.app
+            .experiments
+            .data
+            .as_mut()
+            .and_then(|d| d.as_mut().ok())
+            .unwrap()
+            .metric_columns
+            .push("metrics.json:coverage_50".into());
+        let columns = {
+            let table = h.app.experiments.table().unwrap();
+            h.app.experiments.columns(table)
+        };
+        h.app.experiments.column = columns
+            .iter()
+            .position(|c| c.title() == "metrics.json:coverage_50")
+            .unwrap();
+        h.press(KeyCode::Char('T'));
+        assert!(h.app.prompt.is_none());
+        assert!(h.app.notice.as_ref().unwrap().contains("press B"));
+    }
+
+    #[test]
+    fn equals_compares_two_marked_rows_or_one_marked_and_the_cursor() {
+        let mut h = with_table_loaded();
+        h.press(KeyCode::Char('='));
+        assert!(h.app.experiments.compare.is_none());
+        assert!(h.app.notice.is_some());
+
+        cursor_on(&mut h, "master");
+        h.press(KeyCode::Char(' '));
+        cursor_on(&mut h, "lr-010");
+        h.press(KeyCode::Char('='));
+        assert!(h.app.experiments.compare.is_some());
+        h.press(KeyCode::Char('x'));
+        let (a, b) = h.app.experiments.compare.clone().unwrap();
+        assert_ne!(a, b);
+        h.press(KeyCode::Char('q')); // closes the comparison, does not quit
+        assert!(h.app.experiments.compare.is_none());
+        assert!(!h.app.should_quit);
     }
 
     #[test]

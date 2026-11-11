@@ -134,6 +134,14 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
     ("u", "unchanged"),
     ("Esc", "back"),
 ];
+const COMPARE_KEYS: &[(&str, &str)] = &[
+    ("j/k", "scroll"),
+    ("x", "swap"),
+    ("Tab", "params/metrics"),
+    ("/", "filter"),
+    ("u", "unchanged"),
+    ("Esc", "back"),
+];
 const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("j/k", "row"),
     ("h/l", "column"),
@@ -144,6 +152,9 @@ const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("{ }", "group"),
     ("Enter", "focus"),
     ("Space ,", "mark"),
+    ("T", "best N"),
+    ("=", "compare"),
+    ("?", "all keys"),
     ("z", "only marked"),
     ("-/+", "hide/show col"),
     ("m", "deltas"),
@@ -198,7 +209,9 @@ pub fn view(app: &App, frame: &mut Frame) {
         }
         View::Experiments => {
             experiments::render(app, frame, main);
-            if app.experiments.focus.is_some() {
+            if app.experiments.compare.is_some() {
+                COMPARE_KEYS
+            } else if app.experiments.focus.is_some() {
                 FOCUS_KEYS
             } else {
                 EXPERIMENTS_KEYS

@@ -185,6 +185,9 @@ pub struct Table {
     pub metric_columns: Vec<String>,
     /// Full commit id -> the message given with `dvc exp run -m` (see [`crate::messages`]).
     pub messages: BTreeMap<String, String>,
+    /// Which way metrics improve where the name does not say (or says otherwise): a metric label,
+    /// or part of its name in lower case, to the direction. Set by the config file and `B`.
+    pub directions: BTreeMap<String, Better>,
 }
 
 /// The bare words Python's `json` writes for floats that JSON cannot hold.
@@ -258,6 +261,7 @@ pub fn parse(json: &str) -> Result<Table, serde_json::Error> {
         param_columns,
         metric_columns,
         messages: BTreeMap::new(),
+        directions: BTreeMap::new(),
     })
 }
 
@@ -544,6 +548,23 @@ pub enum Better {
     Lower,
 }
 
+impl Better {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_lowercase().as_str() {
+            "lower" | "low" | "min" | "down" => Some(Self::Lower),
+            "higher" | "high" | "max" | "up" => Some(Self::Higher),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Higher => "higher",
+            Self::Lower => "lower",
+        }
+    }
+}
+
 /// Words in a metric's name that say lower is better / higher is better. The second list is asked
 /// first: `mae_skill` improves upwards although `mae` improves downwards.
 const LOWER_IS_BETTER: &[&str] = &[
@@ -608,7 +629,7 @@ pub fn better_direction(label: &str) -> Option<Better> {
 /// Is `row`'s value of the metric `label` the best of all rows (ties count)? Needs a known
 /// direction and at least two numbers to compare.
 pub fn is_best(table: &Table, row: &Row, label: &str) -> bool {
-    let Some(better) = better_direction(label) else {
+    let Some(better) = table.direction_of(label) else {
         return false;
     };
     let Some(mine) = row.metrics.get(label).and_then(Value::as_f64) else {
@@ -634,6 +655,104 @@ pub fn is_best(table: &Table, row: &Row, label: &str) -> bool {
         },
     );
     mine == best
+}
+
+impl Table {
+    /// Which way the metric improves: what was set for it (its label, else the longest part of
+    /// its name that was given), else what its name says.
+    pub fn direction_of(&self, label: &str) -> Option<Better> {
+        if let Some(better) = self.directions.get(label) {
+            return Some(*better);
+        }
+        let lower = label.to_lowercase();
+        self.directions
+            .iter()
+            .filter(|(part, _)| lower.contains(part.as_str()))
+            .max_by_key(|(part, _)| part.len())
+            .map(|(_, better)| *better)
+            .or_else(|| better_direction(label))
+    }
+
+    /// The commit ids of the `count` best rows (ties may add more) in the metric `label`;
+    /// empty when the direction is unknown.
+    pub fn best_rows(&self, label: &str, count: usize) -> Vec<String> {
+        let Some(better) = self.direction_of(label) else {
+            return Vec::new();
+        };
+        let mut scored: Vec<(f64, &Row)> = self
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let number = row.metrics.get(label)?.as_f64()?;
+                number.is_finite().then_some((number, row))
+            })
+            .collect();
+        scored.sort_by(|a, b| match better {
+            Better::Higher => b.0.total_cmp(&a.0),
+            Better::Lower => a.0.total_cmp(&b.0),
+        });
+        let Some(&(cutoff, _)) = scored.get(count.saturating_sub(1)) else {
+            return scored.iter().map(|(_, row)| row.rev.clone()).collect();
+        };
+        scored
+            .iter()
+            .take_while(|(number, _)| match better {
+                Better::Higher => *number >= cutoff,
+                Better::Lower => *number <= cutoff,
+            })
+            .map(|(_, row)| row.rev.clone())
+            .collect()
+    }
+}
+
+/// One param or metric that differs between two rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompareField {
+    pub column: Column,
+    pub a: String,
+    pub b: String,
+    /// How `b` moved from `a` (numbers only).
+    pub delta: Option<(Change, String)>,
+    /// Which row is better in this metric, when the direction is known: `Some(true)` is `a`.
+    pub a_better: Option<bool>,
+}
+
+/// The params and metrics of `columns` in which `a` and `b` differ.
+pub fn compare_fields(table: &Table, a: &Row, b: &Row, columns: &[Column]) -> Vec<CompareField> {
+    columns
+        .iter()
+        .filter_map(|column| {
+            let (Column::Param(label) | Column::Metric(label)) = column else {
+                return None;
+            };
+            let (left, right) = (cell_text(a, column), cell_text(b, column));
+            if left == right {
+                return None;
+            }
+            let (delta, a_better) = match column {
+                Column::Metric(_) => (
+                    metric_delta(b, a, label),
+                    match (
+                        a.metrics.get(label).and_then(Value::as_f64),
+                        b.metrics.get(label).and_then(Value::as_f64),
+                        table.direction_of(label),
+                    ) {
+                        (Some(x), Some(y), Some(Better::Higher)) if x != y => Some(x > y),
+                        (Some(x), Some(y), Some(Better::Lower)) if x != y => Some(x < y),
+                        _ => None,
+                    },
+                ),
+                _ => (None, None),
+            };
+            Some(CompareField {
+                column: column.clone(),
+                a: left,
+                b: right,
+                delta,
+                a_better,
+            })
+        })
+        .collect()
 }
 
 /// One line of the single-experiment view.
@@ -1110,6 +1229,75 @@ mod tests {
     }
 
     #[test]
+    fn a_set_direction_beats_the_name_and_longest_part_wins() {
+        let mut table = two();
+        assert_eq!(table.direction_of("metrics.json:auc"), Some(Better::Higher));
+        table.directions.insert("auc".into(), Better::Lower);
+        assert_eq!(table.direction_of("metrics.json:auc"), Some(Better::Lower));
+        table
+            .directions
+            .insert("metrics.json:auc".into(), Better::Higher);
+        assert_eq!(table.direction_of("metrics.json:auc"), Some(Better::Higher));
+        // A name that tells nothing gets one from the setting.
+        assert_eq!(table.direction_of("m.json:coverage_50"), None);
+        table.directions.insert("coverage".into(), Better::Higher);
+        assert_eq!(
+            table.direction_of("m.json:coverage_50"),
+            Some(Better::Higher)
+        );
+        // The crown follows it.
+        table.directions.insert("auc".into(), Better::Lower);
+        table.directions.remove("metrics.json:auc");
+        let lr005 = table.rows.iter().find(|r| r.label == "lr-005").unwrap();
+        assert!(!is_best(&table, lr005, "metrics.json:auc"));
+    }
+
+    #[test]
+    fn the_best_rows_are_ranked_in_the_direction_of_the_metric() {
+        let table = two();
+        let label_of = |revs: Vec<String>| -> Vec<String> {
+            let mut names: Vec<String> = revs
+                .iter()
+                .map(|rev| {
+                    table
+                        .rows
+                        .iter()
+                        .find(|r| &r.rev == rev)
+                        .unwrap()
+                        .label
+                        .clone()
+                })
+                .collect();
+            names.sort();
+            names
+        };
+        // auc: workspace and lr-010 tie at the top.
+        assert_eq!(
+            label_of(table.best_rows("metrics.json:auc", 1)),
+            ["lr-010", "workspace"]
+        );
+        assert_eq!(table.best_rows("metrics.json:auc", 10).len(), 4);
+        assert!(table.best_rows("metrics.json:missing", 3).is_empty());
+    }
+
+    #[test]
+    fn compare_lists_only_the_fields_that_differ_and_who_is_ahead() {
+        let table = two();
+        let row = |label: &str| table.rows.iter().find(|r| r.label == label).unwrap();
+        let fields = compare_fields(&table, row("lr-005"), row("lr-010"), &table.columns());
+        assert!(!fields.is_empty());
+        assert!(fields.iter().all(|f| f.a != f.b));
+        let auc = fields
+            .iter()
+            .find(|f| f.column == Column::Metric("metrics.json:auc".into()))
+            .unwrap();
+        assert_eq!(auc.a_better, Some(false), "lr-010 has the higher auc");
+        assert!(auc.delta.is_some());
+        let same = compare_fields(&table, row("lr-010"), row("lr-010"), &table.columns());
+        assert!(same.is_empty());
+    }
+
+    #[test]
     fn focus_fields_list_what_the_row_has_with_its_baseline_and_crowns() {
         let table = two();
         let rows = table.ordered(&Sort::default());
@@ -1410,6 +1598,7 @@ mod tests {
             param_columns: vec!["p:v".into()],
             metric_columns: vec![],
             messages: BTreeMap::new(),
+            directions: BTreeMap::new(),
         }
     }
 

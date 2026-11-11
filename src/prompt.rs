@@ -25,6 +25,10 @@ pub enum PromptKind {
     Branch,
     /// Words the experiments table's column labels must contain; an empty answer clears it.
     Filter,
+    /// How many of the best rows in the metric `label` to mark.
+    Best {
+        label: String,
+    },
     /// A new message for the experiment commit `rev`; the answer replaces the first line.
     Comment {
         rev: String,
@@ -64,6 +68,25 @@ impl Prompt {
             kind: PromptKind::Filter,
             hint: "columns whose label contains all the words; empty shows all (Esc in the table clears it too)",
             validate: |_| Ok(()),
+        }
+    }
+
+    /// Ask how many of the best rows of the metric `label` to mark.
+    pub fn best(label: &str) -> Self {
+        Self {
+            title: "Mark the best rows".to_owned(),
+            label: format!("how many rows of {label}"),
+            target: String::new(),
+            value: "5".to_owned(),
+            error: None,
+            kind: PromptKind::Best {
+                label: label.to_owned(),
+            },
+            hint: "marks the best N rows (ties may add more); z then shows only them",
+            validate: |text| match text.parse::<usize>() {
+                Ok(n) if n > 0 => Ok(()),
+                _ => Err("a whole number above zero, please".to_owned()),
+            },
         }
     }
 

@@ -55,6 +55,7 @@ fn main() -> Result<()> {
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard; // lives until the end of `main`, then `drop` runs
     let mut app = App::new(project, graph);
+    app.apply_config(&dvcat::config::load(&dir));
     app.enable_history();
     let result = run(&mut terminal, app);
     // Restore the terminal first, so the message lands on the normal screen and stays visible.

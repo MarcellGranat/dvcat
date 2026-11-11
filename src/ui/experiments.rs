@@ -70,6 +70,12 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 
 /// The table, with the chart under it when it is switched on.
 fn render_body(view: &ExperimentsView, table: &Table, frame: &mut Frame, inner: Rect) {
+    if let Some((a, b)) = &view.compare {
+        let find = |rev: &String| table.rows.iter().find(|row| &row.rev == rev);
+        if let (Some(a), Some(b)) = (find(a), find(b)) {
+            return render_compare(view, table, a, b, frame, inner);
+        }
+    }
     if let Some(rev) = &view.focus
         && let Some(index) = table
             .ordered(&view.sort)
@@ -290,6 +296,130 @@ fn render_focus(
     );
     frame.render_widget(
         Paragraph::new(format!("{} fields", fields.len())).style(theme::muted()),
+        info_area,
+    );
+}
+
+/// Two rows side by side: only the params and metrics in which they differ, and who is ahead.
+fn render_compare(
+    view: &ExperimentsView,
+    table: &Table,
+    a: &Row,
+    b: &Row,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let columns = view.columns(table);
+    let fields = experiments::compare_fields(table, a, b, &columns);
+    let [head_area, list_area, info_area] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    let head = vec![
+        Line::from(vec![
+            Span::styled(
+                name_cell(a, false),
+                row_style(a).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  compared with  ", theme::muted()),
+            Span::styled(
+                name_cell(b, false),
+                row_style(b).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::styled(format!("{} fields differ", fields.len()), theme::muted()),
+        Line::styled(
+            format!(
+                "{CROWN} = ahead in that metric  ·  x swap sides  ·  Tab/u// change the fields  ·  Esc back"
+            ),
+            theme::muted(),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(head), head_area);
+
+    let width_of = |pick: fn(&experiments::CompareField) -> usize| {
+        fields
+            .iter()
+            .map(pick)
+            .max()
+            .unwrap_or(0)
+            .min(MAX_COLUMN_WIDTH)
+    };
+    let key_width = width_of(|f| f.column.short_title().chars().count());
+    let a_width = width_of(|f| f.a.chars().count() + 2);
+    let b_width = width_of(|f| f.b.chars().count() + 2);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut group = None;
+    for field in &fields {
+        if field.column.group() != group {
+            group = field.column.group();
+            lines.push(Line::styled(
+                format!("▎{}", group.unwrap_or_default()),
+                Style::new()
+                    .fg(header_color(&field.column))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let crown = |wins: bool| {
+            if wins {
+                format!("{CROWN} ")
+            } else {
+                "  ".to_owned()
+            }
+        };
+        let (a_crown, b_crown) = match field.a_better {
+            Some(a_wins) => (crown(a_wins), crown(!a_wins)),
+            None => (crown(false), crown(false)),
+        };
+        let mut spans = vec![
+            Span::raw(format!(
+                "  {:<key_width$}  ",
+                fit(field.column.short_title(), key_width)
+            )),
+            Span::styled(
+                format!(
+                    "{:<a_width$}",
+                    fit(&format!("{a_crown}{}", field.a), a_width)
+                ),
+                Style::new().fg(theme::YELLOW),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!(
+                    "{:<b_width$}",
+                    fit(&format!("{b_crown}{}", field.b), b_width)
+                ),
+                Style::new().fg(theme::YELLOW),
+            ),
+        ];
+        if let Some((change, text)) = &field.delta {
+            let (arrow, color) = match change {
+                Change::Up => ("▲ ", theme::SAPPHIRE),
+                Change::Down => ("▼ ", theme::MAUVE),
+                Change::Same => ("", theme::OVERLAY1),
+            };
+            spans.push(Span::styled(
+                format!("  {arrow}{text}"),
+                Style::new().fg(color),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(
+            "no differences in the shown fields: change the scope (Tab), the filter (/) or show unchanged columns (u)",
+            theme::muted(),
+        ));
+    }
+    let scroll = view.focus_scroll.min(lines.len().saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(lines.into_iter().skip(scroll).collect::<Vec<_>>()),
+        list_area,
+    );
+    frame.render_widget(
+        Paragraph::new(format!("{} vs {}", a.label, b.label)).style(theme::muted()),
         info_area,
     );
 }
