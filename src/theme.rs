@@ -62,3 +62,109 @@ pub fn selected() -> Style {
 pub fn label() -> Style {
     Style::new().fg(OVERLAY1).add_modifier(Modifier::BOLD)
 }
+
+/// Which palette is drawn. The UI always paints with the Mocha colours above; the other themes
+/// replace them in the finished frame ([`Mode::apply`]), so no widget needs to know about them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Catppuccin Mocha, the dark default.
+    #[default]
+    Mocha,
+    /// Catppuccin Latte, for light terminals.
+    Latte,
+    /// Mocha with the red/green pair replaced by orange/blue, which stay apart for most
+    /// colour-vision deficiencies.
+    ColourBlind,
+}
+
+impl Mode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Mocha => Self::Latte,
+            Self::Latte => Self::ColourBlind,
+            Self::ColourBlind => Self::Mocha,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Mocha => "mocha (dark)",
+            Self::Latte => "latte (light)",
+            Self::ColourBlind => "colour-blind safe",
+        }
+    }
+
+    /// Read a theme name from the config file.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_lowercase().as_str() {
+            "mocha" | "dark" => Some(Self::Mocha),
+            "latte" | "light" => Some(Self::Latte),
+            "colourblind" | "colorblind" | "colour-blind" | "color-blind" => {
+                Some(Self::ColourBlind)
+            }
+            _ => None,
+        }
+    }
+
+    /// The colour to draw instead of the Mocha colour `color`.
+    pub fn map(self, color: Color) -> Color {
+        let rgb = |r, g, b| Color::Rgb(r, g, b);
+        match self {
+            Self::Mocha => color,
+            Self::Latte => match color {
+                c if c == MAUVE => rgb(0x88, 0x39, 0xef),
+                c if c == RED => rgb(0xd2, 0x0f, 0x39),
+                c if c == PEACH => rgb(0xfe, 0x64, 0x0b),
+                c if c == YELLOW => rgb(0xdf, 0x8e, 0x1d),
+                c if c == GREEN => rgb(0x40, 0xa0, 0x2b),
+                c if c == TEAL => rgb(0x17, 0x92, 0x99),
+                c if c == SAPPHIRE => rgb(0x20, 0x9f, 0xb5),
+                c if c == BLUE => rgb(0x1e, 0x66, 0xf5),
+                c if c == LAVENDER => rgb(0x72, 0x87, 0xfd),
+                c if c == TEXT => rgb(0x4c, 0x4f, 0x69),
+                c if c == SUBTEXT0 => rgb(0x6c, 0x6f, 0x85),
+                c if c == OVERLAY1 => rgb(0x8c, 0x8f, 0xa1),
+                c if c == OVERLAY0 => rgb(0x9c, 0xa0, 0xb0),
+                c if c == SURFACE2 => rgb(0xac, 0xb0, 0xbe),
+                c if c == SURFACE1 => rgb(0xbc, 0xc0, 0xcc),
+                c if c == SURFACE0 => rgb(0xcc, 0xd0, 0xda),
+                c if c == BASE => rgb(0xef, 0xf1, 0xf5),
+                c if c == CRUST => rgb(0xdc, 0xe0, 0xe8),
+                other => other,
+            },
+            Self::ColourBlind => match color {
+                c if c == GREEN => BLUE,
+                c if c == RED => PEACH,
+                c if c == TEAL => SAPPHIRE,
+                other => other,
+            },
+        }
+    }
+
+    /// Recolour everything drawn so far.
+    pub fn apply(self, buffer: &mut ratatui::buffer::Buffer) {
+        if self == Self::Mocha {
+            return;
+        }
+        for cell in &mut buffer.content {
+            cell.fg = self.map(cell.fg);
+            cell.bg = self.map(cell.bg);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn themes_cycle_and_recolour_only_known_colours() {
+        assert_eq!(Mode::Mocha.next().next().next(), Mode::Mocha);
+        assert_eq!(Mode::Mocha.map(GREEN), GREEN);
+        assert_ne!(Mode::Latte.map(BASE), BASE);
+        assert_eq!(Mode::ColourBlind.map(GREEN), BLUE);
+        assert_eq!(Mode::Latte.map(Color::Red), Color::Red);
+        assert_eq!(Mode::parse("Light"), Some(Mode::Latte));
+        assert_eq!(Mode::parse("nope"), None);
+    }
+}

@@ -28,7 +28,7 @@ use dvcat::{
     ui,
 };
 
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// How long the key thread waits for input before it looks at the `paused` flag again.
 const KEY_POLL: Duration = Duration::from_millis(100);
 

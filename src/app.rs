@@ -16,12 +16,13 @@ use crate::{
     dvc_yaml,
     experiments::{self, ColumnQuery, RowKind, Scope, Sort, Table},
     external,
-    files::{self, FileEntry, Preview},
+    files::{self, FileEntry, Preview, PreviewBody},
     form::{ExperimentForm, FormAction, edit_text},
     graph::{self, Graph},
     history::{self, History, StoredOutcome, StoredRun},
     log::LogBuffer,
     messages,
+    palette::{self, Do, Palette, PaletteAction},
     params_filter::{ParamPicker, PickerAction},
     plot_form::{PlotForm, PlotFormAction},
     plots::{self, Plot},
@@ -61,6 +62,8 @@ pub enum Event {
     PreviewLoaded(Preview),
 }
 
+/// How long a notice stays in the footer before the key hints return.
+const NOTICE_LIFETIME: Duration = Duration::from_secs(8);
 /// How often the lock file is re-read to notice `dvc` runs started elsewhere.
 const EXTERNAL_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -464,6 +467,15 @@ pub struct App {
     /// The open list for hiding param columns; modal like the preview.
     pub param_picker: Option<ParamPicker>,
     pub remote_picker: Option<RemotePicker>,
+    /// The open command palette / key help.
+    pub palette: Option<Palette>,
+    pub theme: crate::theme::Mode,
+    /// Every notice of this session, oldest first (`:messages`).
+    pub messages: Vec<String>,
+    notice_seen: Option<String>,
+    notice_since: Option<Instant>,
+    /// When the app started; the spinner of background work turns with it.
+    pub started: Instant,
     /// The latest finished run of each stage started from this session (DVC keeps no durations).
     pub last_runs: BTreeMap<String, LastRun>,
     /// Seconds each experiment took, by name, for the experiments table.
@@ -510,6 +522,12 @@ impl App {
             prompt: None,
             param_picker: None,
             remote_picker: None,
+            palette: None,
+            theme: crate::theme::Mode::default(),
+            messages: Vec::new(),
+            notice_seen: None,
+            notice_since: None,
+            started: Instant::now(),
             last_runs: BTreeMap::new(),
             experiment_times: BTreeMap::new(),
             persist_history: false,
@@ -631,6 +649,25 @@ impl App {
 
     /// The only function that mutates the app (`&mut self`). It returns the side effects it wants.
     pub fn update(&mut self, event: Event) -> Vec<Effect> {
+        let effects = self.update_inner(event);
+        self.track_notice();
+        effects
+    }
+
+    /// Remember each new notice in the history, and note when it appeared (for fading it).
+    fn track_notice(&mut self) {
+        if self.notice != self.notice_seen {
+            self.notice_seen.clone_from(&self.notice);
+            self.notice_since = self.notice.as_ref().map(|_| Instant::now());
+            if let Some(notice) = &self.notice
+                && self.messages.last() != Some(notice)
+            {
+                self.messages.push(notice.clone());
+            }
+        }
+    }
+
+    fn update_inner(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Key(key) => {
                 self.notice = None;
@@ -694,6 +731,17 @@ impl App {
         if self.remote_picker.is_some() {
             return self.on_remote_picker_key(key);
         }
+        if self.palette.is_some() {
+            return self.on_palette_key(key);
+        }
+        if self.preview.is_none()
+            && (matches!(key.code, KeyCode::Char('?' | ':'))
+                || (key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.code == KeyCode::Char('p')))
+        {
+            self.palette = Some(Palette::new(self.palette_place()));
+            return Vec::new();
+        }
         // An open popup is modal: it gets every key, so `q` closes it instead of quitting.
         if self.preview.is_some() {
             return self.on_preview_key(key.code);
@@ -742,6 +790,69 @@ impl App {
                 View::Plots => self.on_plots_key(code),
             },
         }
+    }
+
+    /// Which group of actions the palette lists for the current screen.
+    fn palette_place(&self) -> palette::Where {
+        match self.view {
+            View::Pipeline if self.focus == Focus::Files => palette::Where::Files,
+            View::Pipeline => palette::Where::Pipeline,
+            View::Experiments => palette::Where::Experiments,
+            View::Dag => palette::Where::Dag,
+            View::Plots => palette::Where::Plots,
+        }
+    }
+
+    fn on_palette_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let Some(mut palette) = self.palette.take() else {
+            return Vec::new();
+        };
+        match palette.on_key(key) {
+            PaletteAction::Continue => self.palette = Some(palette),
+            PaletteAction::Close => {}
+            PaletteAction::Run(entry) => match entry.action {
+                Do::Key(_) => {
+                    if let Some(event) = Palette::key_event(&entry) {
+                        return self.on_key(event);
+                    }
+                }
+                Do::Messages => self.show_messages(),
+                Do::Theme => self.cycle_theme(),
+                Do::Nothing => {}
+            },
+        }
+        Vec::new()
+    }
+
+    /// One frame of the spinner shown while something loads in the background.
+    pub fn spinner(&self) -> char {
+        const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let step = (self.started.elapsed().as_millis() / 100) as usize;
+        FRAMES[step % FRAMES.len()]
+    }
+
+    fn cycle_theme(&mut self) {
+        self.theme = self.theme.next();
+        self.notice = Some(format!("theme: {}", self.theme.name()));
+    }
+
+    /// `:messages`: the notices of this session, newest first, in the preview popup.
+    fn show_messages(&mut self) {
+        let text = if self.messages.is_empty() {
+            "No notices yet.".to_owned()
+        } else {
+            self.messages
+                .iter()
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let body = PreviewBody::Text {
+            text,
+            truncated: false,
+        };
+        self.preview = Some(Preview::new("messages".into(), body));
     }
 
     fn on_pipeline_key(&mut self, code: KeyCode) -> Vec<Effect> {
@@ -1855,6 +1966,14 @@ impl App {
     /// Called every time the main loop wakes up: look again for outside `dvc` runs, at most once
     /// per [`EXTERNAL_CHECK_INTERVAL`].
     pub fn tick(&mut self) {
+        self.track_notice();
+        if self
+            .notice_since
+            .is_some_and(|at| at.elapsed() >= NOTICE_LIFETIME)
+        {
+            self.notice = None;
+            self.track_notice();
+        }
         if self
             .external_checked
             .is_some_and(|at| at.elapsed() < EXTERNAL_CHECK_INTERVAL)
@@ -4863,5 +4982,72 @@ mod dag_view_tests {
         press(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('n'));
         assert!(app.stage_form.is_some());
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+    use crate::test_support::demo_app;
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.update(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn the_palette_lists_filters_and_runs_actions() {
+        let mut app = demo_app();
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.palette.is_some());
+        type_text(&mut app, "graph");
+        press(&mut app, KeyCode::Enter); // the first match presses `g`
+        assert!(app.palette.is_none());
+        assert_eq!(app.view, View::Dag);
+    }
+
+    #[test]
+    fn the_palette_is_modal_and_esc_closes_it() {
+        let mut app = demo_app();
+        press(&mut app, KeyCode::Char(':'));
+        type_text(&mut app, "q"); // typed into the search, not "quit"
+        assert!(!app.should_quit);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.palette.is_none());
+    }
+
+    #[test]
+    fn notices_are_kept_and_fade_away() {
+        let mut app = demo_app();
+        app.notice = Some("first".into());
+        app.track_notice();
+        app.notice = Some("second".into());
+        app.track_notice();
+        assert_eq!(app.messages, ["first", "second"]);
+        app.notice_since = Some(Instant::now() - NOTICE_LIFETIME - Duration::from_secs(1));
+        app.tick();
+        assert!(app.notice.is_none());
+
+        press(&mut app, KeyCode::Char(':'));
+        type_text(&mut app, "messages");
+        press(&mut app, KeyCode::Enter);
+        let preview = app.preview.as_ref().expect("messages shown");
+        assert!(
+            matches!(&preview.body, PreviewBody::Text { text, .. } if text.starts_with("second"))
+        );
+    }
+
+    #[test]
+    fn the_theme_action_cycles_the_theme() {
+        let mut app = demo_app();
+        press(&mut app, KeyCode::Char(':'));
+        type_text(&mut app, "theme");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.theme, crate::theme::Mode::Latte);
     }
 }

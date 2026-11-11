@@ -20,6 +20,7 @@ use crate::{
     files::{FileEntry, FileKind, Preview, PreviewBody},
     form::ExperimentForm,
     history::format_duration,
+    palette::Palette,
     params_filter::{ParamPicker, Shown},
     project::{ParamRef, flatten_leaves, param_value},
     prompt::Prompt,
@@ -97,6 +98,12 @@ const PICKER_KEYS: &[(&str, &str)] = &[
     ("Esc", "close"),
 ];
 const REMOTE_KEYS: &[(&str, &str)] = &[("j/k", "move"), ("Enter", "choose"), ("Esc", "cancel")];
+const PALETTE_KEYS: &[(&str, &str)] = &[
+    ("type", "search"),
+    ("↑/↓", "choose"),
+    ("Enter", "run"),
+    ("Esc", "close"),
+];
 const CONFIRM_KEYS: &[(&str, &str)] = &[("y/Enter", "yes"), ("n/Esc", "no")];
 const DAG_KEYS: &[(&str, &str)] = &[
     ("h/l", "upstream/downstream"),
@@ -271,6 +278,14 @@ pub fn view(app: &App, frame: &mut Frame) {
         None => keys,
     };
 
+    let keys = match &app.palette {
+        Some(palette) => {
+            render_palette(palette, frame, main);
+            PALETTE_KEYS
+        }
+        None => keys,
+    };
+
     let footer_line = match &app.notice {
         Some(notice) => Line::from(Span::styled(
             format!(" {notice} "),
@@ -279,6 +294,60 @@ pub fn view(app: &App, frame: &mut Frame) {
         None => key_hints(keys),
     };
     frame.render_widget(Paragraph::new(footer_line), footer);
+    app.theme.apply(frame.buffer_mut());
+}
+
+/// The command palette: a search line over the actions of this screen with their keys.
+fn render_palette(palette: &Palette, frame: &mut Frame, area: Rect) {
+    let width = (area.width * 80 / 100).max(40).min(area.width);
+    let height = (area.height * 80 / 100).max(8).min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let block = pane("Commands", true).border_style(Style::new().fg(theme::MAUVE));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let [search, list_area] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("> ", Style::new().fg(theme::MAUVE)),
+                Span::raw(palette.query.clone()),
+                Span::styled("▏", Style::new().fg(theme::LAVENDER)),
+            ]),
+            Line::from(Span::styled(
+                "keys and what they do; Enter runs the highlighted one",
+                theme::muted(),
+            )),
+        ]),
+        search,
+    );
+    let items: Vec<ListItem> = palette
+        .matches()
+        .iter()
+        .map(|entry| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<12}", entry.keys),
+                    Style::new()
+                        .fg(theme::LAVENDER)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(entry.what),
+            ])
+            .into()
+        })
+        .collect();
+    let list = List::new(items)
+        .highlight_style(theme::selected())
+        .highlight_symbol("▌ ");
+    let mut state = ListState::default().with_selected(Some(palette.cursor));
+    frame.render_stateful_widget(list, list_area, &mut state);
 }
 
 /// `key description  key description ...`, keys bright and descriptions dim.
@@ -316,6 +385,17 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         left.push(Span::styled(
             format!("  ● running {}", run.stage),
             Style::new().fg(theme::PEACH),
+        ));
+    }
+    let working = match (&app.statuses, app.experiments.loading) {
+        (None, _) => Some("checking stages"),
+        (_, true) => Some("loading experiments"),
+        _ => None,
+    };
+    if let Some(what) = working {
+        left.push(Span::styled(
+            format!("  {} {what}", app.spinner()),
+            Style::new().fg(theme::SAPPHIRE),
         ));
     }
     if let Some(run) = app.external.first() {

@@ -13,6 +13,7 @@ pub mod graph;
 pub mod history;
 pub mod log;
 pub mod messages;
+pub mod palette;
 pub mod params_filter;
 pub mod plot;
 pub mod plot_form;
