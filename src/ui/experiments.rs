@@ -339,7 +339,7 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
 
     let columns = view.columns(table);
     let rows = table.ordered(&view.sort);
-    let widths = column_widths(view, &columns, &rows);
+    let widths = column_widths(view, table, &columns, &rows);
     let cursor_column = view.column.min(columns.len().saturating_sub(1));
     let shown = visible_columns(&widths, cursor_column, usize::from(table_area.width));
 
@@ -371,7 +371,7 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
         .enumerate()
         .map(|(index, row)| {
             let cells = shown.iter().map(|&i| {
-                let (text, style) = body_cell(view, &rows, index, &columns[i]);
+                let (text, style) = body_cell(view, table, &rows, index, &columns[i]);
                 Cell::from(fit(&text, widths[i])).style(style)
             });
             TableRow::new(cells).style(marked_style(view, row))
@@ -470,7 +470,7 @@ fn render_transposed(view: &ExperimentsView, table: &Table, frame: &mut Frame, a
         .map(|(index, _)| {
             fields
                 .iter()
-                .map(|&f| body_cell(view, &rows, index, &columns[f]))
+                .map(|&f| body_cell(view, table, &rows, index, &columns[f]))
                 .collect()
         })
         .collect();
@@ -700,6 +700,7 @@ fn fit(text: &str, width: usize) -> String {
 /// differs is highlighted, and in delta mode a numeric metric shows the difference instead.
 fn body_cell(
     view: &ExperimentsView,
+    table: &Table,
     rows: &[&Row],
     index: usize,
     column: &Column,
@@ -711,6 +712,23 @@ fn body_cell(
             Style::new(),
         );
     }
+    let (text, style) = plain_cell(view, rows, index, column);
+    match column {
+        Column::Metric(label) if experiments::is_best(table, row, label) => {
+            (format!("♛ {text}"), style.fg(theme::YELLOW))
+        }
+        _ => (text, style),
+    }
+}
+
+/// [`body_cell`] without the crown.
+fn plain_cell(
+    view: &ExperimentsView,
+    rows: &[&Row],
+    index: usize,
+    column: &Column,
+) -> (String, Style) {
+    let row = rows[index];
     let text = cell_text(row, column);
     let baseline = baseline_of(rows, index);
     match column {
@@ -736,12 +754,21 @@ fn body_cell(
 }
 
 /// Each column is as wide as its widest cell or title (plus room for a sort arrow), up to a cap.
-fn column_widths(view: &ExperimentsView, columns: &[Column], rows: &[&Row]) -> Vec<usize> {
+fn column_widths(
+    view: &ExperimentsView,
+    table: &Table,
+    columns: &[Column],
+    rows: &[&Row],
+) -> Vec<usize> {
     columns
         .iter()
         .map(|column| {
-            let cells =
-                (0..rows.len()).map(|index| body_cell(view, rows, index, column).0.chars().count());
+            let cells = (0..rows.len()).map(|index| {
+                body_cell(view, table, rows, index, column)
+                    .0
+                    .chars()
+                    .count()
+            });
             let title = column.short_title().chars().count() + 2;
             cells
                 .chain([title])
@@ -1009,6 +1036,15 @@ mod tests {
         );
         let text = screen(&app, 150, 20).join("\n");
         assert!(!text.contains("♛ best of all rows in"), "{text}");
+    }
+
+    #[test]
+    fn the_best_cell_of_a_metric_column_wears_a_crown() {
+        let app = app_showing(Some(Ok(two())));
+        let text = screen(&app, 140, 20).join("\n");
+        assert!(text.contains('♛'), "{text}");
+        let crowns = text.matches('♛').count();
+        assert!((1..=4).contains(&crowns), "{text}");
     }
 
     #[test]

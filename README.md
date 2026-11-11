@@ -201,4 +201,4 @@ Supported: `x`, `y` (a field, a list, or `file: fields`), `title`, `x_label`, `y
 
 ### Which metric is "best"?
 
-The crown needs to know which way a metric improves, and DVC does not say. dvcat reads it from the name: `loss`, `error`, `mae`, `mse`, `rmse`, `crps`, `rhat`, `divergences`, `nll`, `bias`, ... improve downwards; `auc`, `accuracy`, `f1`, `precision`, `recall`, `r2`, `elpd`, `ess`, `score`, `skill` (so `mae_skill` improves upwards) improve upwards. A metric whose name tells nothing (`coverage_50`: the aim is a value) never gets a crown.
+The crown also appears in the table, in front of the best cell of each metric column. It needs to know which way a metric improves, and DVC does not say. dvcat reads it from the name: `loss`, `error`, `mae`, `mse`, `rmse`, `crps`, `rhat`, `divergences`, `nll`, `bias`, ... improve downwards; `auc`, `accuracy`, `f1`, `precision`, `recall`, `r2`, `elpd`, `ess`, `score`, `skill` (so `mae_skill` improves upwards) improve upwards. A metric whose name tells nothing (`coverage_50`: the aim is a value) never gets a crown.
