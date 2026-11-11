@@ -363,6 +363,15 @@ fn render_palette(palette: &Palette, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(list, list_area, &mut state);
 }
 
+/// ` · 1m 02s of ~3m 05s`: how long the run has taken, and how long it took the last time.
+fn progress(run: &Run) -> String {
+    let elapsed = format_duration(run.started.elapsed());
+    match run.estimate {
+        Some(estimate) => format!(" · {elapsed} of ~{}", format_duration(estimate)),
+        None => format!(" · {elapsed}"),
+    }
+}
+
 /// `key description  key description ...`, keys bright and descriptions dim.
 fn key_hints(keys: &[(&str, &str)]) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
@@ -396,7 +405,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     ];
     if let Some(run) = app.run.as_ref().filter(|run| run.is_active()) {
         left.push(Span::styled(
-            format!("  ● running {}", run.stage),
+            format!("  ● running {}{}", run.stage, progress(run)),
             Style::new().fg(theme::PEACH),
         ));
     }
@@ -1694,6 +1703,8 @@ mod tests {
             kill: vec![],
             toggles: vec![],
             targets: None,
+            stage_run: None,
+            estimate: None,
         });
         let rows = render(&app, 100, 24);
         let text = rows.join("\n");
@@ -1735,6 +1746,8 @@ mod tests {
                 text: "data/raw".into(),
                 editing: false,
             }),
+            stage_run: None,
+            estimate: None,
         });
         let text = render(&app, 100, 24).join("\n");
         assert!(text.contains("[x] t only the data of stage a"), "{text}");

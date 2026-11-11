@@ -21,7 +21,7 @@ use crate::{
     files::{self, FileEntry, Preview, PreviewBody},
     form::{ExperimentForm, FormAction, edit_text},
     graph::{self, Graph},
-    history::{self, History, SavedView, StoredOutcome, StoredRun},
+    history::{self, History, SavedView, StoredOutcome, StoredRun, format_duration},
     log::LogBuffer,
     messages,
     palette::{self, Do, Palette, PaletteAction},
@@ -33,7 +33,7 @@ use crate::{
     remotes::{self, Remote, RemoteChoice, RemotePicker, Transfer},
     runner::{self, Attached, DvcNotFound, KILL_GRACE, RunOutcome, RunRecord, RunningJob},
     stage_form::{self, Pick, StageForm, StageFormAction},
-    stale::{self, StageStatus},
+    stale::{self, StageStatus, Status},
 };
 
 /// At most this many files are offered to `fzf`.
@@ -88,6 +88,10 @@ pub struct Confirm {
     pub toggles: Vec<Toggle>,
     /// A free-text field for more targets (paths, stages, `.dvc` files), when the command takes them.
     pub targets: Option<Targets>,
+    /// When set, confirming runs this stage (with its upstream, if the flag is set) instead of `args`.
+    pub stage_run: Option<(String, bool)>,
+    /// How long the confirmed run is expected to take, from the last runs.
+    pub estimate: Option<Duration>,
 }
 
 /// The text of the targets field of a [`Confirm`]; `p` starts editing it.
@@ -146,6 +150,8 @@ fn blocked_confirm(blocking: &[external::ExternalRun]) -> Confirm {
         kill: blocking.iter().map(|run| run.pid).collect(),
         toggles: Vec::new(),
         targets: None,
+        stage_run: None,
+        estimate: None,
     }
 }
 
@@ -367,12 +373,14 @@ pub struct Run {
     /// Lines scrolled back from the bottom; 0 follows new output.
     pub scroll: usize,
     /// When the run was requested.
-    started: Instant,
+    pub started: Instant,
     /// How long it took; `None` while it is still going.
     elapsed: Option<Duration>,
     /// A duration known from elsewhere (a run that ended while the interface was closed), used
     /// instead of the time since `started`.
     fixed_duration: Option<Duration>,
+    /// How long the run is expected to take, from the last runs of its stages.
+    pub estimate: Option<Duration>,
     job: Option<RunningJob>,
 }
 
@@ -427,6 +435,7 @@ impl Run {
             started: Instant::now(),
             elapsed: None,
             fixed_duration: None,
+            estimate: None,
             job: None,
         }
     }
@@ -529,6 +538,8 @@ pub struct App {
     /// Every notice of this session, oldest first (`:messages`).
     pub messages: Vec<String>,
     saved_view: SavedView,
+    /// Set while a confirmed `R` is being started, so it does not ask again.
+    confirm_skipped: bool,
     notice_seen: Option<String>,
     notice_since: Option<Instant>,
     /// When the app started; the spinner of background work turns with it.
@@ -585,6 +596,7 @@ impl App {
             mouse: false,
             messages: Vec::new(),
             saved_view: SavedView::default(),
+            confirm_skipped: false,
             notice_seen: None,
             notice_since: None,
             started: Instant::now(),
@@ -2113,6 +2125,8 @@ impl App {
             kill: Vec::new(),
             toggles,
             targets: Some(Targets::default()),
+            stage_run: None,
+            estimate: None,
         });
     }
 
@@ -2133,6 +2147,8 @@ impl App {
                 kill: Vec::new(),
                 toggles: Vec::new(),
                 targets: None,
+        stage_run: None,
+        estimate: None,
             },
             Action::Remove => Confirm {
                 title: format!("Remove {name}?"),
@@ -2145,6 +2161,8 @@ impl App {
                 kill: Vec::new(),
                 toggles: Vec::new(),
                 targets: None,
+        stage_run: None,
+        estimate: None,
             },
         });
     }
@@ -2274,6 +2292,15 @@ impl App {
                     self.notice = Some("stopping the other dvc process…".to_owned());
                     vec![Effect::StopExternal(kill)]
                 }
+                Some(Confirm {
+                    stage_run: Some((_, with_upstream)),
+                    ..
+                }) => {
+                    self.confirm_skipped = true;
+                    let effects = self.request_run(with_upstream);
+                    self.confirm_skipped = false;
+                    effects
+                }
                 Some(confirm) => {
                     let (label, args) = confirm.command();
                     self.begin_dvc_run(label, args)
@@ -2391,11 +2418,100 @@ impl App {
             self.notice = Some(format!("cannot run '{name}': {reason} (X stops it)"));
             return Vec::new();
         }
-        self.run = Some(Run::new(name.clone(), with_upstream));
+        if with_upstream && self.confirm.is_none() && !self.confirm_skipped {
+            self.confirm = Some(self.rerun_confirm(&name));
+            return Vec::new();
+        }
+        let mut run = Run::new(name.clone(), with_upstream);
+        run.estimate = if with_upstream {
+            self.rerun_plan(&name).1
+        } else {
+            self.last_runs.get(&name).map(|last| last.duration)
+        };
+        self.run = Some(run);
         vec![Effect::StartRun {
             stage: name,
             with_upstream,
         }]
+    }
+
+    /// The stages `dvc repro <stage>` may re-run (the stage and everything it depends on that is not
+    /// up to date, in the order of the graph), and the time they took the last time, when known.
+    /// Stages with no recorded time are counted in the second number.
+    fn rerun_plan(&self, stage: &str) -> (Vec<String>, Option<Duration>, usize) {
+        let Some(start) = self.project.stages.iter().position(|s| s.name == stage) else {
+            return (Vec::new(), None, 0);
+        };
+        let mut wanted = BTreeSet::from([start]);
+        let mut pending = vec![start];
+        while let Some(index) = pending.pop() {
+            for &up in &self.graph.upstream[index] {
+                if wanted.insert(up) {
+                    pending.push(up);
+                }
+            }
+        }
+        let stale = |index: usize| {
+            index == start
+                || self
+                    .statuses
+                    .as_ref()
+                    .and_then(|statuses| statuses.get(index))
+                    .is_none_or(|status| status.status() != Status::UpToDate)
+        };
+        let names: Vec<String> = self
+            .graph
+            .order
+            .iter()
+            .copied()
+            .filter(|index| wanted.contains(index) && stale(*index))
+            .map(|index| self.project.stages[index].name.clone())
+            .collect();
+        let known: Vec<Duration> = names
+            .iter()
+            .filter_map(|name| self.last_runs.get(name).map(|last| last.duration))
+            .collect();
+        let total = (!known.is_empty()).then(|| known.iter().sum());
+        let unknown = names.len() - known.len();
+        (names, total, unknown)
+    }
+
+    /// The question before `R`: what will be re-run, and how long it took the last time.
+    fn rerun_confirm(&self, stage: &str) -> Confirm {
+        let (names, estimate, unknown) = self.rerun_plan(stage);
+        let args = runner::repro_args(stage, true);
+        let mut lines = vec![format!("dvc {}", args.join(" "))];
+        lines.push(format!(
+            "Runs {} stage(s) that are not up to date: {}",
+            names.len(),
+            names.join(", ")
+        ));
+        lines.push("DVC skips the others, and runs them if something upstream changes.".to_owned());
+        lines.push(match estimate {
+            Some(total) => format!(
+                "About {} going by the last runs{}.",
+                format_duration(total),
+                if unknown > 0 {
+                    format!(" ({unknown} stage(s) have no recorded time)")
+                } else {
+                    String::new()
+                }
+            ),
+            None => {
+                "No earlier run of these stages is known, so there is no time estimate.".to_owned()
+            }
+        });
+        Confirm {
+            title: format!("Run {stage} with its upstream?"),
+            lines,
+            label: stage.to_owned(),
+            args,
+            kill: Vec::new(),
+            toggles: Vec::new(),
+            targets: None,
+            stage_run: Some((stage.to_owned(), true)),
+            estimate,
+        }
     }
 
     fn request_cancel(&mut self) -> Vec<Effect> {
@@ -3045,6 +3161,15 @@ mod run_tests {
         let mut h = harness("echo \"args: $*\"");
         h.press(KeyCode::Char('j')); // stage b
         h.press(KeyCode::Char('R'));
+        // R asks first: what will run, and how long it took before.
+        let confirm = h.app.confirm.as_ref().expect("R asks first");
+        assert!(
+            confirm.lines.iter().any(|l| l == "dvc repro b"),
+            "{:?}",
+            confirm.lines
+        );
+        assert!(h.app.run.is_none());
+        h.press(KeyCode::Char('y'));
         h.pump_until_finished();
         assert_eq!(h.lines(), ["args: repro b"]);
     }
@@ -4934,6 +5059,7 @@ mod experiments_view_tests {
             "echo \"Stage 'up' didn't change, skipping\"; echo \"Running stage 'a':\"; sleep 0.1",
         );
         h.press(KeyCode::Char('R'));
+        h.press(KeyCode::Char('y')); // R asks first
         wait_until_finished(&mut h);
         assert!(
             h.app.last_runs.contains_key("a"),
@@ -4945,6 +5071,7 @@ mod experiments_view_tests {
     fn a_failed_run_is_recorded_even_if_the_log_mentions_other_skips() {
         let mut h = harness("echo \"Stage 'up' didn't change, skipping\"; exit 1");
         h.press(KeyCode::Char('R'));
+        h.press(KeyCode::Char('y')); // R asks first
         wait_until_finished(&mut h);
         assert_eq!(
             h.app.last_runs["a"].outcome,
@@ -5743,6 +5870,92 @@ mod saved_view_tests {
                 experiments::Column::Metric("m.json:loss".into()),
                 experiments::Direction::Descending
             ))
+        );
+    }
+}
+
+#[cfg(test)]
+mod estimate_tests {
+    use super::*;
+    use crate::test_support::{demo_app, with_statuses};
+
+    fn last(seconds: u64) -> LastRun {
+        LastRun {
+            outcome: RunOutcome::Succeeded,
+            duration: Duration::from_secs(seconds),
+        }
+    }
+
+    #[test]
+    fn the_plan_lists_the_stages_to_run_and_adds_up_their_last_times() {
+        let mut app = with_statuses(demo_app());
+        let (names, total, unknown) = app.rerun_plan("train");
+        assert_eq!(names.last().map(String::as_str), Some("train"), "{names:?}");
+        assert!(total.is_none(), "no run is known yet");
+        assert_eq!(unknown, names.len());
+
+        app.last_runs.insert("train".into(), last(120));
+        app.last_runs.insert("prepare".into(), last(30));
+        let (names, total, unknown) = app.rerun_plan("train");
+        let expected = if names.iter().any(|n| n == "prepare") {
+            150
+        } else {
+            120
+        };
+        assert_eq!(total, Some(Duration::from_secs(expected)));
+        assert_eq!(unknown, names.len() - if expected == 150 { 2 } else { 1 });
+    }
+
+    #[test]
+    fn capital_r_asks_with_the_command_and_the_estimate_and_y_starts_the_run() {
+        let mut app = with_statuses(demo_app());
+        app.selected = app.stage_count() - 1; // train
+        app.last_runs.insert("train".into(), last(90));
+        let press = |app: &mut App, c| {
+            app.update(Event::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )))
+        };
+        assert!(press(&mut app, 'R').is_empty());
+        let confirm = app.confirm.as_ref().expect("a question");
+        assert!(confirm.lines[0].starts_with("dvc repro"));
+        assert!(
+            confirm.lines.iter().any(|l| l.contains("About")),
+            "{:?}",
+            confirm.lines
+        );
+        assert!(app.run.is_none());
+
+        let effects = press(&mut app, 'y');
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::StartRun {
+                with_upstream: true,
+                ..
+            }]
+        ));
+        assert!(app.run.as_ref().unwrap().estimate.is_some());
+
+        // `n` changes nothing.
+        let mut other = with_statuses(demo_app());
+        press(&mut other, 'R');
+        press(&mut other, 'n');
+        assert!(other.confirm.is_none() && other.run.is_none());
+    }
+
+    #[test]
+    fn a_plain_r_still_runs_at_once_and_expects_the_last_time() {
+        let mut app = with_statuses(demo_app());
+        app.last_runs.insert("prepare".into(), last(42));
+        let effects = app.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(effects.as_slice(), [Effect::StartRun { .. }]));
+        assert_eq!(
+            app.run.as_ref().unwrap().estimate,
+            Some(Duration::from_secs(42))
         );
     }
 }

@@ -74,6 +74,15 @@ If none is found, pressing `r` explains where it looked.
 | `Enter`    | *(experiments)* focus on the experiment under the cursor: all its params and metrics in a list, grouped, next to the baseline's value and the change. A `♛` marks the metrics in which it is the best of all rows (ties count). `j`/`k` scroll, `h`/`l` show the previous / next row, `Tab`, `/` and `u` work as in the table, `Esc`, `Enter` or `q` go back |
 | `m`        | *(experiments)* show metrics of experiments as differences from their baseline (`▲ +0.1867`) and back |
 | `t`        | *(experiments)* transpose: experiments across the top, params and metrics down the side (`h`/`j`/`k`/`l` follow the screen) |
+| `?` `:` `Ctrl+P` | the **command palette**: every action of the current screen with its key. Type words to search, `↑`/`↓` to choose, `Enter` runs it (`Esc` closes). `:messages` lists this session's notices, `:theme` switches mocha / latte / colour-blind |
+| `T`        | *(experiments)* mark the best N rows (asked, 5 by default) of the metric under the cursor; then `z` shows only them |
+| `B`        | *(experiments)* which way the metric under the cursor improves: read from its name, lower or higher (saved in `.dvc/tmp`; the config file can set it too) |
+| `=`        | *(experiments)* compare two rows: the two marked ones, or the marked one and the cursor row. Only params and metrics that differ are listed, with the change and a `♛` on the one that is ahead; `x` swaps the sides |
+| `f`        | *(experiments)* pin the column under the cursor to the left (it stays on screen however far you scroll, and ignores the scope and filter); again unpins |
+| `F`        | *(experiments)* numbered metrics (`by_fold.0.rmse`, `by_fold.1.rmse`, ...) are folded into one column with a sparkline and the mean (`▁█▅ 2.0`); `F` shows them one by one |
+| `y` / `Y`  | *(experiments)* copy the cell / the whole row as JSON to the clipboard (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or the terminal's OSC 52) |
+| `E`        | *(experiments)* write the table as it is sorted and filtered to `dvcat-experiments.csv` in the project |
+| `o`        | on a stage: open its script (or params file) in `$EDITOR`; *(experiments)* open the file of the column under the cursor |
 | `F5`       | *(experiments)* reload with `dvc exp show --json -A` |
 | `n`        | *(experiments)* new experiment: a form with a name and every param, pre-filled from the row under the cursor |
 | `a` / `d`  | *(experiments)* apply / remove the experiment under the cursor, after a yes/no question |
@@ -107,6 +116,25 @@ It runs `dvc exp run --temp` (an isolated copy, so your workspace is untouched),
 The files pane lists what the selected stage reads and writes (deps, param files, outs, metrics).
 A preview shows at most the first 64 KiB of a file; directories are listed and binary files are not dumped.
 While a preview is open it receives all keys (`q` closes it), except `Ctrl+C`, which still quits.
+
+## Config
+
+`.dvcat.yaml` in the project directory (everything is optional):
+
+```yaml
+theme: latte            # mocha (default), latte or colour-blind
+mouse: true             # click rows, headers and stages; the wheel scrolls (takes over text selection; Shift+drag still selects in most terminals)
+better:                 # which way a metric improves: its label, or a part of its name
+  coverage_90: higher
+  gap: lower
+```
+
+The experiments table also remembers how you left it (scope, filter, pinned columns, sort, deltas, folded series, hidden columns, metric directions) in `.dvc/tmp/dvcat-history.json` and restores it next time.
+
+`R` (run a stage with its upstream) asks first: the command, the stages that are not up to date and will run, and about how long they took the last time. While a stage runs the header shows the time so far next to that estimate.
+
+Notices fade after a few seconds; `:messages` in the palette lists them all.
+
 
 ## Graph
 
