@@ -59,6 +59,43 @@ pub fn stage_files(stage: &Stage) -> Vec<FileEntry> {
     entries
 }
 
+const CODE_EXTENSIONS: &[&str] = &[
+    "py", "r", "sh", "jl", "ipynb", "sql", "rs", "js", "ts", "ps1", "rmd", "qmd", "ml", "go",
+];
+
+fn is_code(path: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, ext)| CODE_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+}
+
+/// The file worth opening for a stage: the script its command runs, else a code file among its
+/// deps, else its params file. Paths are relative to `root`.
+pub fn stage_script(stage: &Stage, root: &std::path::Path) -> Option<String> {
+    let exists = |path: &str| root.join(path).is_file();
+    let in_command = stage
+        .cmd
+        .split_whitespace()
+        .map(|word| word.trim_matches(['"', '\'']))
+        .find(|word| is_code(word) && exists(word));
+    in_command
+        .map(str::to_owned)
+        .or_else(|| {
+            stage
+                .deps
+                .iter()
+                .find(|path| is_code(path) && exists(path))
+                .cloned()
+        })
+        .or_else(|| {
+            stage
+                .params
+                .iter()
+                .map(|p| &p.file)
+                .find(|path| exists(path))
+                .cloned()
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewBody {
     Text { text: String, truncated: bool },
@@ -249,5 +286,28 @@ mod tests {
             Preview::new("a".into(), PreviewBody::Missing).line_count(),
             1
         );
+    }
+
+    #[test]
+    fn a_stage_opens_its_script_then_a_code_dep_then_its_params_file() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["train.py", "params.yaml", "lib.R"] {
+            std::fs::write(dir.path().join(name), "x").unwrap();
+        }
+        let mut stage = stage();
+        stage.cmd = "python train.py --lr 3".into();
+        stage.deps = vec!["data".into(), "lib.R".into()];
+        stage.params = vec![ParamRef {
+            file: "params.yaml".into(),
+            keys: vec![],
+        }];
+        let root = dir.path();
+        assert_eq!(stage_script(&stage, root).as_deref(), Some("train.py"));
+        stage.cmd = "make".into();
+        assert_eq!(stage_script(&stage, root).as_deref(), Some("lib.R"));
+        stage.deps.clear();
+        assert_eq!(stage_script(&stage, root).as_deref(), Some("params.yaml"));
+        stage.params.clear();
+        assert_eq!(stage_script(&stage, root), None);
     }
 }

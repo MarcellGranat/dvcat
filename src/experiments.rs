@@ -846,6 +846,32 @@ impl Table {
     }
 }
 
+/// The rows as CSV: a header of the full column labels, then a line per row.
+pub fn csv_text(rows: &[&Row], columns: &[Column]) -> String {
+    fn field(text: &str) -> String {
+        if text.contains([',', '"', '\n', '\r']) {
+            format!("\"{}\"", text.replace('"', "\"\""))
+        } else {
+            text.to_owned()
+        }
+    }
+    let mut out = columns
+        .iter()
+        .map(|column| field(column.title()))
+        .collect::<Vec<_>>()
+        .join(",");
+    out.push('\n');
+    for row in rows {
+        let line: Vec<String> = columns
+            .iter()
+            .map(|column| field(&cell_text(row, column)))
+            .collect();
+        out.push_str(&line.join(","));
+        out.push('\n');
+    }
+    out
+}
+
 /// One param or metric that differs between two rows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompareField {
@@ -1513,6 +1539,19 @@ mod tests {
                 .columns_for(&q)
                 .contains(&Column::Param("params.yaml:train.lr".into()))
         );
+    }
+
+    #[test]
+    fn csv_has_a_header_a_line_per_row_and_quotes_what_needs_it() {
+        let mut table = two();
+        table.rows[0].label = "a,\"b\"".into();
+        let rows: Vec<&Row> = table.rows.iter().collect();
+        let columns = [Column::Name, Column::Metric("metrics.json:auc".into())];
+        let csv = csv_text(&rows, &columns);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "name,metrics.json:auc");
+        assert_eq!(lines.len(), 1 + table.rows.len());
+        assert!(lines[1].starts_with("\"a,\"\"b\"\"\","), "{}", lines[1]);
     }
 
     #[test]

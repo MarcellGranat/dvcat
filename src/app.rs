@@ -62,6 +62,8 @@ pub enum Event {
     PreviewLoaded(Preview),
 }
 
+/// Where `E` writes the experiments table, in the project directory.
+const CSV_FILE: &str = "dvcat-experiments.csv";
 /// How long a notice stays in the footer before the key hints return.
 const NOTICE_LIFETIME: Duration = Duration::from_secs(8);
 /// How often the lock file is re-read to notice `dvc` runs started elsewhere.
@@ -296,6 +298,10 @@ pub enum Effect {
     LoadPreview(String),
     /// Hand a project file to `$EDITOR`. The terminal belongs to `main`, so we only leave a request.
     OpenEditor(String),
+    /// Put this text on the clipboard.
+    Copy(String),
+    /// Write the table as CSV to the project directory.
+    ExportCsv(String),
     /// Stop `dvc` processes that were started outside dvcat (by process id).
     StopExternal(Vec<u32>),
     /// Give the experiment commit `rev` a new message, then reload the table.
@@ -1001,10 +1007,28 @@ impl App {
             KeyCode::Char('R') => return self.request_run(true),
             KeyCode::PageUp => self.scroll_log_back(),
             KeyCode::PageDown => self.scroll_log_forward(),
+            KeyCode::Char('o') => return self.open_stage_script(),
             KeyCode::Char('n') => self.stage_form = Some(StageForm::default()),
             _ => {}
         }
         Vec::new()
+    }
+
+    /// `o` on a stage: its script (or, failing that, its params file) in `$EDITOR`.
+    fn open_stage_script(&mut self) -> Vec<Effect> {
+        let script = self
+            .selected_stage()
+            .and_then(|stage| files::stage_script(stage, &self.project.root));
+        match script {
+            Some(path) => vec![Effect::OpenEditor(path)],
+            None => {
+                self.notice = Some(
+                    "no script or params file found for this stage; Tab goes to its files"
+                        .to_owned(),
+                );
+                Vec::new()
+            }
+        }
     }
 
     fn toggle_focus(&mut self) {
@@ -1386,6 +1410,10 @@ impl App {
             KeyCode::Enter => self.open_focus(),
             KeyCode::Char('=') => self.open_compare(),
             KeyCode::Char('f') => self.toggle_pin(),
+            KeyCode::Char('y') => return self.copy_cell(),
+            KeyCode::Char('Y') => return self.copy_row(),
+            KeyCode::Char('E') => return self.export_csv(),
+            KeyCode::Char('o') => return self.open_column_file(),
             KeyCode::Char('F') => {
                 self.experiments.unfolded = !self.experiments.unfolded;
                 self.notice = Some(
@@ -1575,6 +1603,69 @@ impl App {
         };
         self.experiments.focus = Some(rev);
         self.experiments.focus_scroll = 0;
+    }
+
+    /// `y`: the full text of the cell under the cursor to the clipboard.
+    fn copy_cell(&mut self) -> Vec<Effect> {
+        let Some(table) = self.experiments.table() else {
+            return Vec::new();
+        };
+        let columns = self.experiments.columns(table);
+        let (Some(column), Some(row)) = (columns.get(self.experiments.column), self.cursor_row())
+        else {
+            return Vec::new();
+        };
+        vec![Effect::Copy(experiments::cell_text(row, column))]
+    }
+
+    /// `Y`: the row under the cursor, with all its params and metrics, as JSON.
+    fn copy_row(&mut self) -> Vec<Effect> {
+        let Some(row) = self.cursor_row() else {
+            return Vec::new();
+        };
+        let json = serde_json::json!({
+            "name": row.label,
+            "rev": row.rev,
+            "params": row.params,
+            "metrics": row.metrics,
+        });
+        vec![Effect::Copy(
+            serde_json::to_string_pretty(&json).unwrap_or_default(),
+        )]
+    }
+
+    /// `E`: the table as it is sorted and filtered, with the columns it shows (numbered metrics one
+    /// by one), as CSV.
+    fn export_csv(&mut self) -> Vec<Effect> {
+        let Some(table) = self.experiments.table() else {
+            return Vec::new();
+        };
+        let columns = self.experiments.columns_with(table, false);
+        let rows = table.ordered(&self.experiments.sort);
+        vec![Effect::ExportCsv(experiments::csv_text(&rows, &columns))]
+    }
+
+    /// `o`: the file of the param or metric under the cursor in `$EDITOR`.
+    fn open_column_file(&mut self) -> Vec<Effect> {
+        let Some(table) = self.experiments.table() else {
+            return Vec::new();
+        };
+        let columns = self.experiments.columns(table);
+        match columns.get(self.experiments.column) {
+            Some(
+                experiments::Column::Param(label)
+                | experiments::Column::Metric(label)
+                | experiments::Column::Spread(label),
+            ) => match label.split_once(':') {
+                Some((file, _)) => vec![Effect::OpenEditor(file.to_owned())],
+                None => Vec::new(),
+            },
+            _ => {
+                self.notice =
+                    Some("o opens the file of the param or metric under the cursor".to_owned());
+                Vec::new()
+            }
+        }
     }
 
     /// `f`: keep the column under the cursor at the left (or let it scroll away again).
@@ -2448,6 +2539,22 @@ impl App {
                 } else {
                     self.notice = Some(format!("{path} does not exist yet"));
                 }
+            }
+            Effect::Copy(text) => {
+                self.notice = Some(match crate::clipboard::copy(&text) {
+                    Ok(how) => format!("copied {} characters via {how}", text.chars().count()),
+                    Err(error) => error,
+                });
+            }
+            Effect::ExportCsv(text) => {
+                let path = self.project.root.join(CSV_FILE);
+                self.notice = Some(match fs::write(&path, &text) {
+                    Ok(()) => format!(
+                        "wrote {} rows to {CSV_FILE}",
+                        text.lines().count().saturating_sub(1)
+                    ),
+                    Err(error) => format!("could not write {CSV_FILE}: {error}"),
+                });
             }
             Effect::RefreshStatuses => {
                 if let Err(error) = self.project.reload_state() {
@@ -3608,6 +3715,55 @@ mod experiments_view_tests {
         h.press(KeyCode::Char('q')); // closes the comparison, does not quit
         assert!(h.app.experiments.compare.is_none());
         assert!(!h.app.should_quit);
+    }
+
+    #[test]
+    fn y_copies_the_cell_capital_y_the_row_and_o_opens_the_columns_file() {
+        let mut h = with_table_loaded();
+        cursor_at(&mut h, "lr-010", "params.yaml:train.lr");
+        let copied = h.app.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(copied, [Effect::Copy("0.1".into())]);
+
+        let row = h.app.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('Y'),
+            KeyModifiers::NONE,
+        )));
+        let [Effect::Copy(json)] = row.as_slice() else {
+            panic!("expected a copy: {row:?}");
+        };
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(value["name"], "lr-010");
+        assert!(value["metrics"].is_object() && value["params"].is_object());
+
+        let open = h.app.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(open, [Effect::OpenEditor("params.yaml".into())]);
+    }
+
+    #[test]
+    fn capital_e_exports_the_table_as_shown_to_a_csv_file() {
+        let mut h = with_table_loaded();
+        cursor_on(&mut h, "master");
+        h.press(KeyCode::Char('z')); // nothing marked: marks like the cell, then filters
+        let effects = h.press(KeyCode::Char('E'));
+        let [Effect::ExportCsv(csv)] = effects.as_slice() else {
+            panic!("expected an export: {effects:?}");
+        };
+        assert!(csv.starts_with("name,"));
+        assert!(
+            h.app
+                .notice
+                .as_ref()
+                .unwrap()
+                .contains("dvcat-experiments.csv")
+        );
+        let written = fs::read_to_string(h.dir.path().join("dvcat-experiments.csv")).unwrap();
+        assert_eq!(&written, csv);
     }
 
     #[test]
