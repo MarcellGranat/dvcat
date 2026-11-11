@@ -64,6 +64,27 @@ pub struct StoredRun {
     pub seconds: f64,
 }
 
+/// How the experiments table was left: restored when the project is opened again.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SavedView {
+    /// `params`, `metrics` or `all`; empty keeps the default.
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub filter: String,
+    #[serde(default)]
+    pub show_unchanged: bool,
+    #[serde(default)]
+    pub unfolded: bool,
+    #[serde(default)]
+    pub deltas: bool,
+    #[serde(default)]
+    pub pinned: BTreeSet<String>,
+    /// The sorted column (see `Column::to_key`) and `asc` / `desc`.
+    #[serde(default)]
+    pub sort: Option<(String, String)>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct History {
     /// Latest finished run of each stage.
@@ -75,6 +96,9 @@ pub struct History {
     /// Param columns hidden in the experiments table.
     #[serde(default)]
     pub hidden_params: BTreeSet<String>,
+    /// The experiments table as the user left it.
+    #[serde(default)]
+    pub view: SavedView,
     /// Metric label -> `lower` / `higher`, as set with `B`.
     #[serde(default)]
     pub directions: BTreeMap<String, String>,

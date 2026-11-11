@@ -19,7 +19,7 @@ use crate::{
     files::{self, FileEntry, Preview, PreviewBody},
     form::{ExperimentForm, FormAction, edit_text},
     graph::{self, Graph},
-    history::{self, History, StoredOutcome, StoredRun},
+    history::{self, History, SavedView, StoredOutcome, StoredRun},
     log::LogBuffer,
     messages,
     palette::{self, Do, Palette, PaletteAction},
@@ -226,6 +226,10 @@ pub struct ExperimentsView {
     pub focus: Option<String>,
     /// How many lines the single-experiment view is scrolled.
     pub focus_scroll: usize,
+    /// Columns kept at the left whatever the scope or the scrolling (`f`), by label.
+    pub pinned: BTreeSet<String>,
+    /// Show every numbered metric (`by_fold.0`, ...) on its own instead of one sparkline (`F`).
+    pub unfolded: bool,
     /// The two commit ids shown side by side (`=`); the scroll is `focus_scroll`.
     pub compare: Option<(String, String)>,
 }
@@ -235,14 +239,34 @@ impl ExperimentsView {
         self.data.as_ref()?.as_ref().ok()
     }
 
-    /// The columns on screen, as chosen by the scope, the filter and the hidden params.
+    /// The columns on screen, as chosen by the scope, the filter, the pins and the hidden params.
     pub fn columns(&self, table: &Table) -> Vec<experiments::Column> {
+        self.columns_with(table, !self.unfolded)
+    }
+
+    /// The same, with numbered series of metrics folded into one sparkline column or not.
+    pub fn columns_with(&self, table: &Table, fold: bool) -> Vec<experiments::Column> {
         table.columns_for(&ColumnQuery {
             scope: self.scope,
             hidden: &self.hidden,
             show_unchanged: self.show_unchanged,
             filter: &self.filter,
+            pinned: &self.pinned,
+            fold,
         })
+    }
+
+    /// How many columns at the left stay on screen: the name and the pinned ones.
+    pub fn fixed_columns(&self, columns: &[experiments::Column]) -> usize {
+        1 + columns
+            .iter()
+            .filter(|column| match column {
+                experiments::Column::Param(label)
+                | experiments::Column::Metric(label)
+                | experiments::Column::Spread(label) => self.pinned.contains(label),
+                _ => false,
+            })
+            .count()
     }
 
     /// Start again from the first column, after the set of columns changed.
@@ -478,6 +502,7 @@ pub struct App {
     pub mouse: bool,
     /// Every notice of this session, oldest first (`:messages`).
     pub messages: Vec<String>,
+    saved_view: SavedView,
     notice_seen: Option<String>,
     notice_since: Option<Instant>,
     /// When the app started; the spinner of background work turns with it.
@@ -533,6 +558,7 @@ impl App {
             theme: crate::theme::Mode::default(),
             mouse: false,
             messages: Vec::new(),
+            saved_view: SavedView::default(),
             notice_seen: None,
             notice_since: None,
             started: Instant::now(),
@@ -578,12 +604,69 @@ impl App {
         }
         self.experiment_times.extend(remembered.experiments);
         self.experiments.hidden = remembered.hidden_params;
+        self.restore_view(&remembered.view);
+        self.saved_view = self.current_view();
         for (label, name) in remembered.directions {
             if let Some(better) = experiments::Better::parse(&name) {
                 self.directions.insert(label, better);
             }
         }
         self.persist_history = true;
+    }
+
+    /// How the experiments table is set up now, as it is remembered between sessions.
+    fn current_view(&self) -> SavedView {
+        let view = &self.experiments;
+        SavedView {
+            scope: view.scope.label().to_lowercase(),
+            filter: view.filter.clone(),
+            show_unchanged: view.show_unchanged,
+            unfolded: view.unfolded,
+            deltas: view.deltas,
+            pinned: view.pinned.clone(),
+            sort: view.sort.by.as_ref().map(|(column, direction)| {
+                let direction = match direction {
+                    experiments::Direction::Ascending => "asc",
+                    experiments::Direction::Descending => "desc",
+                };
+                (column.to_key(), direction.to_owned())
+            }),
+        }
+    }
+
+    fn restore_view(&mut self, saved: &SavedView) {
+        let view = &mut self.experiments;
+        if let Some(scope) = Scope::ALL
+            .iter()
+            .find(|scope| scope.label().to_lowercase() == saved.scope)
+        {
+            view.scope = *scope;
+        }
+        view.filter.clone_from(&saved.filter);
+        view.show_unchanged = saved.show_unchanged;
+        view.unfolded = saved.unfolded;
+        view.deltas = saved.deltas;
+        view.pinned.clone_from(&saved.pinned);
+        view.sort.by = saved.sort.as_ref().and_then(|(key, direction)| {
+            let direction = if direction == "desc" {
+                experiments::Direction::Descending
+            } else {
+                experiments::Direction::Ascending
+            };
+            Some((experiments::Column::from_key(key)?, direction))
+        });
+    }
+
+    /// Remember the table's set-up whenever a key changed it.
+    fn remember_view(&mut self) {
+        if !self.persist_history {
+            return;
+        }
+        let now = self.current_view();
+        if now != self.saved_view {
+            self.saved_view = now;
+            self.save_history();
+        }
     }
 
     fn save_history(&self) {
@@ -608,6 +691,7 @@ impl App {
             stages,
             experiments: self.experiment_times.clone(),
             hidden_params: self.experiments.hidden.clone(),
+            view: self.current_view(),
             directions: self
                 .directions
                 .iter()
@@ -681,8 +765,12 @@ impl App {
 
     /// The only function that mutates the app (`&mut self`). It returns the side effects it wants.
     pub fn update(&mut self, event: Event) -> Vec<Effect> {
+        let is_key = matches!(event, Event::Key(_));
         let effects = self.update_inner(event);
         self.track_notice();
+        if is_key {
+            self.remember_view();
+        }
         effects
     }
 
@@ -1297,6 +1385,19 @@ impl App {
             KeyCode::Char('z') => self.toggle_row_filter(),
             KeyCode::Enter => self.open_focus(),
             KeyCode::Char('=') => self.open_compare(),
+            KeyCode::Char('f') => self.toggle_pin(),
+            KeyCode::Char('F') => {
+                self.experiments.unfolded = !self.experiments.unfolded;
+                self.notice = Some(
+                    if self.experiments.unfolded {
+                        "numbered metrics shown one by one (F folds them again)"
+                    } else {
+                        "numbered metrics folded into one sparkline column (F unfolds them)"
+                    }
+                    .to_owned(),
+                );
+                self.experiments.columns_changed();
+            }
             KeyCode::Char('T') => self.open_best_prompt(),
             KeyCode::Char('B') => self.cycle_direction(),
             KeyCode::Char('n') => self.open_experiment_form(),
@@ -1474,6 +1575,47 @@ impl App {
         };
         self.experiments.focus = Some(rev);
         self.experiments.focus_scroll = 0;
+    }
+
+    /// `f`: keep the column under the cursor at the left (or let it scroll away again).
+    fn toggle_pin(&mut self) {
+        let Some(table) = self.experiments.table() else {
+            return;
+        };
+        let columns = self.experiments.columns(table);
+        let Some(
+            experiments::Column::Param(label)
+            | experiments::Column::Metric(label)
+            | experiments::Column::Spread(label),
+        ) = columns.get(self.experiments.column)
+        else {
+            self.notice = Some("f pins a param or metric column to the left".to_owned());
+            return;
+        };
+        let label = label.clone();
+        let pinned = self.experiments.pinned.insert(label.clone());
+        if !pinned {
+            self.experiments.pinned.remove(&label);
+        }
+        self.notice = Some(if pinned {
+            format!("{label} pinned; it stays on screen (f again unpins)")
+        } else {
+            format!("{label} unpinned")
+        });
+        // Follow the column to its new place.
+        if let Some(table) = self.experiments.table() {
+            let columns = self.experiments.columns(table);
+            let at = columns.iter().position(|c| match c {
+                experiments::Column::Param(l)
+                | experiments::Column::Metric(l)
+                | experiments::Column::Spread(l) => *l == label,
+                _ => false,
+            });
+            if let Some(at) = at {
+                self.experiments.column = at;
+            }
+        }
+        self.save_history();
     }
 
     /// `=`: two rows side by side, showing only what differs. Two marked rows, or one marked row
@@ -5301,5 +5443,47 @@ mod palette_tests {
         type_text(&mut app, "theme");
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.theme, crate::theme::Mode::Latte);
+    }
+}
+
+#[cfg(test)]
+mod saved_view_tests {
+    use super::*;
+    use crate::test_support::{app_at, app_with_files};
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.update(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn the_table_setup_comes_back_in_the_next_session() {
+        let (dir, mut app) = app_with_files(&[("dvc.yaml", "stages:\n  a:\n    cmd: x\n")]);
+        std::fs::create_dir(dir.path().join(".dvc")).unwrap();
+        app.enable_history();
+        app.view = View::Experiments;
+        press(&mut app, KeyCode::Tab); // Metrics -> All
+        press(&mut app, KeyCode::Char('u'));
+        press(&mut app, KeyCode::Char('F'));
+        press(&mut app, KeyCode::Char('m'));
+        app.experiments.pinned.insert("params.yaml:x".into());
+        app.experiments.sort.by = Some((
+            experiments::Column::Metric("m.json:loss".into()),
+            experiments::Direction::Descending,
+        ));
+        press(&mut app, KeyCode::Char('j')); // any key saves the changes
+
+        let mut next = app_at(dir.path());
+        next.enable_history();
+        let view = &next.experiments;
+        assert_eq!(view.scope, Scope::All);
+        assert!(view.show_unchanged && view.unfolded && view.deltas);
+        assert!(view.pinned.contains("params.yaml:x"));
+        assert_eq!(
+            view.sort.by,
+            Some((
+                experiments::Column::Metric("m.json:loss".into()),
+                experiments::Direction::Descending
+            ))
+        );
     }
 }

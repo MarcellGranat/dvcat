@@ -163,7 +163,7 @@ fn render_focus(
 ) {
     let rows = table.ordered(&view.sort);
     let row = rows[index];
-    let columns = view.columns(table);
+    let columns = view.columns_with(table, false);
     let fields = experiments::focus_fields(table, &rows, index, &columns);
     let crowns = fields.iter().filter(|field| field.best).count();
 
@@ -309,7 +309,7 @@ fn render_compare(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let columns = view.columns(table);
+    let columns = view.columns_with(table, false);
     let fields = experiments::compare_fields(table, a, b, &columns);
     let [head_area, list_area, info_area] = Layout::vertical([
         Constraint::Length(3),
@@ -471,7 +471,12 @@ fn render_table(view: &ExperimentsView, table: &Table, frame: &mut Frame, area: 
     let rows = table.ordered(&view.sort);
     let widths = column_widths(view, table, &columns, &rows);
     let cursor_column = view.column.min(columns.len().saturating_sub(1));
-    let shown = visible_columns(&widths, cursor_column, usize::from(table_area.width));
+    let shown = visible_columns(
+        &widths,
+        cursor_column,
+        usize::from(table_area.width),
+        view.fixed_columns(&columns),
+    );
 
     frame.render_widget(
         Paragraph::new(group_band(&columns, &shown, &widths)),
@@ -626,7 +631,7 @@ fn render_transposed(view: &ExperimentsView, table: &Table, frame: &mut Frame, a
             .unwrap_or(0);
         widths.push(widest.min(MAX_COLUMN_WIDTH));
     }
-    let shown = visible_columns(&widths, cursor_row + 1, usize::from(table_area.width));
+    let shown = visible_columns(&widths, cursor_row + 1, usize::from(table_area.width), 1);
 
     let header = TableRow::new(shown.iter().map(|&i| {
         if i == 0 {
@@ -805,7 +810,7 @@ fn header_color(column: &Column) -> Color {
     match column {
         Column::Name => theme::TEXT,
         Column::Param(_) => theme::PEACH,
-        Column::Metric(_) => theme::GREEN,
+        Column::Metric(_) | Column::Spread(_) => theme::GREEN,
         Column::Duration | Column::Age => theme::SUBTEXT0,
     }
 }
@@ -911,21 +916,28 @@ fn column_widths(
 
 /// Which columns to draw in `available` characters: the name column always, then a window of the
 /// others that includes the cursor column. Returns indices into `widths`.
-pub fn visible_columns(widths: &[usize], cursor: usize, available: usize) -> Vec<usize> {
+pub fn visible_columns(
+    widths: &[usize],
+    cursor: usize,
+    available: usize,
+    fixed: usize,
+) -> Vec<usize> {
     if widths.is_empty() {
         return Vec::new();
     }
     let cost = |index: usize| COLUMN_SPACING + widths[index];
-    let name_width = widths[0].min(available);
-    let target = cursor.clamp(1, widths.len().saturating_sub(1).max(1));
+    // The name and the pinned columns are always shown.
+    let fixed = fixed.clamp(1, widths.len());
+    let name_width = widths[0].min(available) + (1..fixed).map(cost).sum::<usize>();
+    let target = cursor.clamp(fixed, widths.len().saturating_sub(1).max(fixed));
 
     // Slide the window right until the cursor column fits.
-    let mut start = 1;
+    let mut start = fixed;
     while start < target && name_width + (start..=target).map(cost).sum::<usize>() > available {
         start += 1;
     }
 
-    let mut shown = vec![0];
+    let mut shown: Vec<usize> = (0..fixed).collect();
     let mut used = name_width;
     for index in start..widths.len() {
         // Columns up to the cursor are always shown; later ones only while they fit.
@@ -1040,24 +1052,28 @@ mod tests {
 
     #[test]
     fn name_column_is_always_shown_and_everything_fits_when_there_is_room() {
-        assert_eq!(visible_columns(&[10, 5, 5, 5], 0, 100), [0, 1, 2, 3]);
-        assert_eq!(visible_columns(&[10], 0, 100), [0]);
-        assert_eq!(visible_columns(&[], 0, 100), Vec::<usize>::new());
+        assert_eq!(visible_columns(&[10, 5, 5, 5], 0, 100, 1), [0, 1, 2, 3]);
+        assert_eq!(visible_columns(&[10], 0, 100, 1), [0]);
+        assert_eq!(visible_columns(&[], 0, 100, 1), Vec::<usize>::new());
     }
 
     #[test]
     fn the_window_slides_so_the_cursor_column_stays_visible() {
         let widths = [10, 8, 8, 8, 8, 8];
         // 10 + 2 spacing-and-8 per column: room for the name and two more columns.
-        assert_eq!(visible_columns(&widths, 1, 32), [0, 1, 2]);
-        assert_eq!(visible_columns(&widths, 5, 32), [0, 4, 5]);
-        let shown = visible_columns(&widths, 3, 32);
+        assert_eq!(visible_columns(&widths, 1, 32, 1), [0, 1, 2]);
+        assert_eq!(visible_columns(&widths, 5, 32, 1), [0, 4, 5]);
+        let shown = visible_columns(&widths, 3, 32, 1);
         assert!(shown.contains(&0) && shown.contains(&3), "{shown:?}");
     }
 
     #[test]
     fn a_column_wider_than_the_screen_is_still_shown() {
-        assert_eq!(visible_columns(&[10, 50], 1, 20), [0, 1]);
+        assert_eq!(visible_columns(&[10, 50], 1, 20, 1), [0, 1]);
+        // Pinned columns (here two fixed ones) stay while the window slides on.
+        let widths = [10, 5, 5, 5, 5, 5];
+        assert_eq!(visible_columns(&widths, 5, 24, 2), [0, 1, 5]);
+        assert_eq!(visible_columns(&widths, 0, 100, 2), [0, 1, 2, 3, 4, 5]);
     }
 
     #[test]

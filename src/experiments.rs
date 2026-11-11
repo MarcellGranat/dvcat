@@ -92,6 +92,9 @@ pub enum Column {
     Duration,
     /// How long ago the experiment was made (`3h ago`); shown when a row has a timestamp.
     Age,
+    /// A series of metrics that differ only in a number (`m.json:by_fold.*.rmse`), drawn as one
+    /// sparkline with the mean. The text is the metric's label with the number replaced by `*`.
+    Spread(String),
 }
 
 /// Which kind of columns the table shows. Hundreds of params and metrics do not fit one table,
@@ -133,6 +136,10 @@ pub struct ColumnQuery<'a> {
     pub show_unchanged: bool,
     /// Words that must all appear in a column's label (case does not matter).
     pub filter: &'a str,
+    /// Columns kept at the left whatever the scope, the filter or the unchanged ones say.
+    pub pinned: &'a BTreeSet<String>,
+    /// Draw a series of numbered metrics (`by_fold.0`, `by_fold.1`, ...) as one sparkline column.
+    pub fold: bool,
 }
 
 /// Split a label `file:a.b.leaf` into its group (`file:a.b`, or just `file` when the key has no
@@ -152,15 +159,19 @@ impl Column {
     /// The group a param or metric belongs to (`params.yaml:train`).
     pub fn group(&self) -> Option<&str> {
         match self {
-            Column::Param(label) | Column::Metric(label) => Some(split_group(label).0),
             Column::Name | Column::Duration | Column::Age => None,
+            Column::Param(label) | Column::Metric(label) | Column::Spread(label) => {
+                Some(split_group(label).0)
+            }
         }
     }
 
     /// The header text without the group, which is shown on a line of its own.
     pub fn short_title(&self) -> &str {
         match self {
-            Column::Param(label) | Column::Metric(label) => split_group(label).1,
+            Column::Param(label) | Column::Metric(label) | Column::Spread(label) => {
+                split_group(label).1
+            }
             other => other.title(),
         }
     }
@@ -171,9 +182,100 @@ impl Column {
             Column::Name => "name",
             Column::Duration => "run time",
             Column::Age => "age",
-            Column::Param(label) | Column::Metric(label) => label,
+            Column::Param(label) | Column::Metric(label) | Column::Spread(label) => label,
         }
     }
+
+    /// A text that names the column in the saved view (see [`Column::from_key`]).
+    pub fn to_key(&self) -> String {
+        match self {
+            Column::Name => "name".to_owned(),
+            Column::Duration => "duration".to_owned(),
+            Column::Age => "age".to_owned(),
+            Column::Param(label) => format!("param:{label}"),
+            Column::Metric(label) => format!("metric:{label}"),
+            Column::Spread(label) => format!("spread:{label}"),
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Column> {
+        Some(match key {
+            "name" => Column::Name,
+            "duration" => Column::Duration,
+            "age" => Column::Age,
+            _ => {
+                let (kind, label) = key.split_once(':')?;
+                match kind {
+                    "param" => Column::Param(label.to_owned()),
+                    "metric" => Column::Metric(label.to_owned()),
+                    "spread" => Column::Spread(label.to_owned()),
+                    _ => return None,
+                }
+            }
+        })
+    }
+}
+
+/// `m.json:by_fold.3.rmse` -> (`m.json:by_fold.*.rmse`, 3): the first all-digit part of a metric's
+/// key is the number of the series.
+pub fn series_key(label: &str) -> Option<(String, u64)> {
+    let key_start = label.find(':').map_or(0, |colon| colon + 1);
+    let mut offset = key_start;
+    for part in label[key_start..].split('.') {
+        if !part.is_empty()
+            && part.len() <= 9
+            && part.bytes().all(|b| b.is_ascii_digit())
+            && let Ok(number) = part.parse()
+        {
+            let mut key = label[..offset].to_owned();
+            key.push('*');
+            key.push_str(&label[offset + part.len()..]);
+            return Some((key, number));
+        }
+        offset += part.len() + 1;
+    }
+    None
+}
+
+/// The values of the series `key` in `row`, in the order of their numbers.
+pub fn series_values(row: &Row, key: &str) -> Vec<f64> {
+    let mut found: Vec<(u64, f64)> = row
+        .metrics
+        .iter()
+        .filter_map(|(label, value)| {
+            let (found_key, number) = series_key(label)?;
+            (found_key == key).then_some(())?;
+            Some((number, value.as_f64().filter(|v| v.is_finite())?))
+        })
+        .collect();
+    found.sort_by_key(|(number, _)| *number);
+    found.into_iter().map(|(_, value)| value).collect()
+}
+
+const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// `▂▃▅█▆ 0.123`: the values on their own scale, then their mean.
+pub fn sparkline(values: &[f64]) -> String {
+    if values.is_empty() {
+        return String::new();
+    }
+    let (low, high) = values
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(*v), hi.max(*v))
+        });
+    let bars: String = values
+        .iter()
+        .map(|v| {
+            if high > low {
+                BLOCKS[(((v - low) / (high - low)) * 7.0).round() as usize]
+            } else {
+                BLOCKS[3]
+            }
+        })
+        .collect();
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    format!("{bars} {}", display(&Value::from(mean)))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -325,6 +427,8 @@ impl Table {
             hidden: &BTreeSet::new(),
             show_unchanged: true,
             filter: "",
+            pinned: &BTreeSet::new(),
+            fold: false,
         })
     }
 
@@ -353,7 +457,58 @@ impl Table {
         let keep = |column: &Column| query.show_unchanged || self.varies(column);
         let params = matches!(query.scope, Scope::Params | Scope::All);
         let metrics = matches!(query.scope, Scope::Metrics | Scope::All);
+        let pinned = |label: &str| query.pinned.contains(label);
+        // The series worth folding: three or more metrics that differ only in a number.
+        let mut series: BTreeMap<String, usize> = BTreeMap::new();
+        if query.fold {
+            for label in &self.metric_columns {
+                if let Some((key, _)) = series_key(label) {
+                    *series.entry(key).or_default() += 1;
+                }
+            }
+            series.retain(|_, count| *count >= 3);
+        }
+        let mut params_out: Vec<Column> = Vec::new();
+        let mut metrics_out: Vec<Column> = Vec::new();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for label in &self.param_columns {
+            let column = Column::Param(label.clone());
+            if query.hidden.contains(label) {
+                continue;
+            }
+            if pinned(label) || (params && wanted(label) && keep(&column)) {
+                params_out.push(column);
+            }
+        }
+        for label in &self.metric_columns {
+            let folded = series_key(label).filter(|(key, _)| series.contains_key(key));
+            let (column, shown_label) = match folded {
+                Some((key, _)) => {
+                    if !seen.insert(key.clone()) {
+                        continue;
+                    }
+                    (Column::Spread(key.clone()), key)
+                }
+                None => (Column::Metric(label.clone()), label.clone()),
+            };
+            if query.hidden.contains(&shown_label) {
+                continue;
+            }
+            if pinned(&shown_label) || (metrics && wanted(&shown_label) && keep(&column)) {
+                metrics_out.push(column);
+            }
+        }
+        let is_pinned = |column: &Column| match column {
+            Column::Param(label) | Column::Metric(label) | Column::Spread(label) => pinned(label),
+            _ => false,
+        };
+        let (pinned_columns, rest): (Vec<Column>, Vec<Column>) = params_out
+            .into_iter()
+            .chain(metrics_out)
+            .partition(|column| is_pinned(column));
         std::iter::once(Column::Name)
+            // Pinned columns stay on screen at the left, however far the table is scrolled.
+            .chain(pinned_columns)
             // Next to the name, which is always on screen; at the far right it would scroll out of sight.
             .chain(
                 self.rows
@@ -367,22 +522,7 @@ impl Table {
                     .any(|row| row.timestamp.is_some())
                     .then_some(Column::Age),
             )
-            .chain(
-                self.param_columns
-                    .iter()
-                    .filter(|label| params && !query.hidden.contains(*label) && wanted(label))
-                    .cloned()
-                    .map(Column::Param)
-                    .filter(keep),
-            )
-            .chain(
-                self.metric_columns
-                    .iter()
-                    .filter(|label| metrics && !query.hidden.contains(*label) && wanted(label))
-                    .cloned()
-                    .map(Column::Metric)
-                    .filter(keep),
-            )
+            .chain(rest)
             .collect()
     }
 
@@ -444,6 +584,7 @@ pub fn cell_text(row: &Row, column: &Column) -> String {
         Column::Name => row.label.clone(),
         Column::Param(label) => row.params.get(label).map(display).unwrap_or_default(),
         Column::Metric(label) => row.metrics.get(label).map(display).unwrap_or_default(),
+        Column::Spread(key) => sparkline(&series_values(row, key)),
         Column::Duration => row
             .run_secs
             .map(|secs| format_duration(Duration::from_secs_f64(secs)))
@@ -932,6 +1073,15 @@ fn sort_value(row: &Row, column: &Column) -> Option<SortValue> {
         }
         Column::Param(label) => row.params.get(label)?,
         Column::Metric(label) => row.metrics.get(label)?,
+        Column::Spread(key) => {
+            let values = series_values(row, key);
+            if values.is_empty() {
+                return None;
+            }
+            return Some(SortValue::Number(
+                values.iter().sum::<f64>() / values.len() as f64,
+            ));
+        }
     };
     Some(match value.as_f64() {
         Some(number) => SortValue::Number(number),
@@ -1052,11 +1202,14 @@ mod tests {
         filter: &'a str,
         hidden: &'a BTreeSet<String>,
     ) -> ColumnQuery<'a> {
+        static NONE: BTreeSet<String> = BTreeSet::new();
         ColumnQuery {
             scope,
             hidden,
             show_unchanged,
             filter,
+            pinned: &NONE,
+            fold: false,
         }
     }
 
@@ -1295,6 +1448,71 @@ mod tests {
         assert!(auc.delta.is_some());
         let same = compare_fields(&table, row("lr-010"), row("lr-010"), &table.columns());
         assert!(same.is_empty());
+    }
+
+    fn folds_table() -> Table {
+        let json = r#"[
+          {"rev": "workspace", "name": null, "data": {"timestamp": null, "params": {},
+            "metrics": {"m.json": {"data": {"by_fold": {"0": {"rmse": 1.0}, "1": {"rmse": 3.0},
+              "2": {"rmse": 2.0}}, "loss": 0.5}}}}},
+          {"rev": "b", "name": "other", "data": {"timestamp": null, "params": {},
+            "metrics": {"m.json": {"data": {"by_fold": {"0": {"rmse": 2.0}, "1": {"rmse": 2.0},
+              "2": {"rmse": 2.0}}, "loss": 0.7}}}}}
+        ]"#;
+        parse(json).unwrap()
+    }
+
+    #[test]
+    fn numbered_metrics_are_one_sparkline_column_when_folded() {
+        assert_eq!(
+            series_key("m.json:by_fold.12.rmse"),
+            Some(("m.json:by_fold.*.rmse".to_owned(), 12))
+        );
+        assert_eq!(series_key("m.json:loss"), None);
+        let table = folds_table();
+        let none = BTreeSet::new();
+        let mut query = query(Scope::Metrics, true, "", &none);
+        let unfolded = table.columns_for(&query);
+        assert_eq!(unfolded.len(), 1 + 4);
+        query.fold = true;
+        let folded = table.columns_for(&query);
+        assert_eq!(
+            folded,
+            [
+                Column::Name,
+                Column::Spread("m.json:by_fold.*.rmse".into()),
+                Column::Metric("m.json:loss".into())
+            ]
+        );
+        let spread = &folded[1];
+        assert_eq!(cell_text(&table.rows[0], spread), "▁█▅ 2.0");
+        assert_eq!(cell_text(&table.rows[1], spread), "▄▄▄ 2.0");
+        assert_eq!(spread.group(), Some("m.json:by_fold.*"));
+        assert_eq!(spread.short_title(), "rmse");
+        assert_eq!(Column::from_key(&spread.to_key()), Some(spread.clone()));
+    }
+
+    #[test]
+    fn pinned_columns_come_first_and_ignore_scope_and_filter() {
+        let table = two();
+        let none = BTreeSet::new();
+        let pinned: BTreeSet<String> = ["params.yaml:train.lr".to_owned()].into();
+        let mut q = query(Scope::Metrics, true, "auc", &none);
+        q.pinned = &pinned;
+        let columns = table.columns_for(&q);
+        assert_eq!(columns[0], Column::Name);
+        assert_eq!(columns[1], Column::Param("params.yaml:train.lr".into()));
+        assert!(columns.contains(&Column::Metric("metrics.json:auc".into())));
+        assert!(!columns.contains(&Column::Metric("metrics.json:loss".into())));
+        // Hiding wins over pinning.
+        let hidden: BTreeSet<String> = ["params.yaml:train.lr".to_owned()].into();
+        let mut q = query(Scope::Metrics, true, "", &hidden);
+        q.pinned = &pinned;
+        assert!(
+            !table
+                .columns_for(&q)
+                .contains(&Column::Param("params.yaml:train.lr".into()))
+        );
     }
 
     #[test]
