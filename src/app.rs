@@ -505,6 +505,8 @@ pub struct App {
     pub graph: Graph,
     /// Position in the displayed (topological) order, *not* an index into `project.stages`.
     pub selected: usize,
+    /// Stage groups (`split` for `split@0`, `split@1`, ...) shown as one row (`z` toggles).
+    pub collapsed: BTreeSet<String>,
     /// `None` while the first stale check is still running.
     pub statuses: Option<Vec<StageStatus>>,
     pub run: Option<Run>,
@@ -566,15 +568,37 @@ pub struct App {
     pub should_quit: bool,
 }
 
+/// `split` for `split@3`.
+fn group_name(name: &str) -> Option<&str> {
+    name.split_once('@').map(|(group, _)| group)
+}
+
+/// Groups with several members start folded, so a `foreach` over ten folds is one row.
+fn default_collapsed(project: &Project) -> BTreeSet<String> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for stage in &project.stages {
+        if let Some(group) = group_name(&stage.name) {
+            *counts.entry(group).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|&(_, count)| count >= 3)
+        .map(|(group, _)| group.to_owned())
+        .collect()
+}
+
 impl App {
     pub fn new(project: Project, graph: Graph) -> Self {
         let names: Vec<&str> = project.stages.iter().map(|s| s.name.as_str()).collect();
         let dag = dag::layout(&names, &graph);
+        let collapsed = default_collapsed(&project);
         Self {
             project,
             graph,
             dag,
             selected: 0,
+            collapsed,
             statuses: None,
             run: None,
             view: View::Pipeline,
@@ -747,6 +771,68 @@ impl App {
                 row.run_secs = self.experiment_times.get(&row.label).copied();
             }
         }
+    }
+
+    /// The group a stage belongs to: `split` for `split@3`, when other stages share the prefix.
+    fn group_of<'a>(&self, name: &'a str) -> Option<&'a str> {
+        let (group, _) = name.split_once('@')?;
+        let members = self
+            .project
+            .stages
+            .iter()
+            .filter(|s| group_name(&s.name) == Some(group))
+            .count();
+        (members > 1).then_some(group)
+    }
+
+    /// The positions the list shows: a collapsed group is only represented by its first member.
+    pub fn visible_positions(&self) -> Vec<usize> {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        (0..self.stage_count())
+            .filter(|&position| {
+                let Some(stage) = self.stage_at(position) else {
+                    return false;
+                };
+                match self.group_of(&stage.name) {
+                    Some(group) if self.collapsed.contains(group) => seen.insert(group),
+                    _ => true,
+                }
+            })
+            .collect()
+    }
+
+    /// The members (positions) of the collapsed group at `position`, if it is one.
+    pub fn collapsed_members(&self, position: usize) -> Option<(String, Vec<usize>)> {
+        let group = self.group_of(&self.stage_at(position)?.name)?.to_owned();
+        if !self.collapsed.contains(&group) {
+            return None;
+        }
+        let members = (0..self.stage_count())
+            .filter(|&p| {
+                self.stage_at(p)
+                    .is_some_and(|s| group_name(&s.name) == Some(group.as_str()))
+            })
+            .collect();
+        Some((group, members))
+    }
+
+    /// `z` on a stage of a group: fold the group into one row or open it again.
+    fn toggle_group(&mut self) {
+        let Some(stage) = self.selected_stage() else {
+            return;
+        };
+        let Some(group) = self.group_of(&stage.name).map(str::to_owned) else {
+            self.notice = Some("this stage is not part of a group (name@key)".to_owned());
+            return;
+        };
+        if !self.collapsed.remove(&group) {
+            self.collapsed.insert(group.clone());
+            // Land on the row that now stands for the group.
+            if let Some((_, members)) = self.collapsed_members(self.selected) {
+                self.selected = members[0];
+            }
+        }
+        self.file_cursor = 0;
     }
 
     pub fn stage_count(&self) -> usize {
@@ -1019,8 +1105,8 @@ impl App {
                 if inside(area) && y > area.y {
                     let index =
                         self.experiments.hits.stages_offset.get() + usize::from(y - area.y - 1);
-                    if index < self.stage_count() {
-                        self.selected = index;
+                    if let Some(&position) = self.visible_positions().get(index) {
+                        self.selected = position;
                         self.file_cursor = 0;
                         self.focus = Focus::Stages;
                     }
@@ -1124,6 +1210,7 @@ impl App {
             KeyCode::PageDown => self.scroll_log_forward(),
             KeyCode::Char('o') => return self.open_stage_script(),
             KeyCode::Char('n') => self.stage_form = Some(StageForm::default()),
+            KeyCode::Char('z') if self.focus == Focus::Stages => self.toggle_group(),
             _ => {}
         }
         Vec::new()
@@ -1332,6 +1419,7 @@ impl App {
             .unwrap_or(0);
         self.file_cursor = 0;
         self.statuses = None;
+        self.collapsed = default_collapsed(&project);
         self.project = project;
         self.graph = graph;
         Ok(())
@@ -1535,7 +1623,7 @@ impl App {
                     if self.experiments.unfolded {
                         "numbered metrics shown one by one (F folds them again)"
                     } else {
-                        "numbered metrics folded into one sparkline column (F unfolds them)"
+                        "numbered metrics folded into mean ±spread columns (F unfolds them)"
                     }
                     .to_owned(),
                 );
@@ -2414,6 +2502,12 @@ impl App {
             return Vec::new();
         }
         let name = stage.name.clone();
+        if self.collapsed_members(self.selected).is_some() {
+            self.notice = Some(format!(
+                "'{name}' stands for a folded group: z opens it, then run one stage"
+            ));
+            return Vec::new();
+        }
         if let Some(reason) = self.blocked_by_outside_run(with_upstream) {
             self.notice = Some(format!("cannot run '{name}': {reason} (X stops it)"));
             return Vec::new();
@@ -2927,17 +3021,27 @@ impl App {
     }
 
     fn move_selection_down(&mut self) {
-        if self.selected + 1 < self.stage_count() {
-            self.selected += 1;
-            self.file_cursor = 0;
-        }
+        self.step_selection(1);
     }
 
     fn move_selection_up(&mut self) {
-        // `saturating_sub` stops at 0 instead of underflowing (usize can't be negative).
-        let before = self.selected;
-        self.selected = self.selected.saturating_sub(1);
-        if self.selected != before {
+        self.step_selection(-1);
+    }
+
+    /// Move to the next (or previous) row of the list, skipping what a collapsed group hides.
+    fn step_selection(&mut self, by: isize) {
+        let visible = self.visible_positions();
+        let here = visible
+            .iter()
+            .rposition(|&p| p <= self.selected)
+            .unwrap_or(0);
+        let there = here
+            .saturating_add_signed(by)
+            .min(visible.len().saturating_sub(1));
+        if let Some(&position) = visible.get(there)
+            && position != self.selected
+        {
+            self.selected = position;
             self.file_cursor = 0;
         }
     }

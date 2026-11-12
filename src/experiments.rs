@@ -252,30 +252,46 @@ pub fn series_values(row: &Row, key: &str) -> Vec<f64> {
     found.into_iter().map(|(_, value)| value).collect()
 }
 
-const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-
-/// `▂▃▅█▆ 0.123`: the values on their own scale, then their mean.
+/// `0.1234 ±0.012`: the mean of the values and how far they typically stray from it.
 pub fn sparkline(values: &[f64]) -> String {
     if values.is_empty() {
         return String::new();
     }
-    let (low, high) = values
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
-            (lo.min(*v), hi.max(*v))
-        });
-    let bars: String = values
-        .iter()
-        .map(|v| {
-            if high > low {
-                BLOCKS[(((v - low) / (high - low)) * 7.0).round() as usize]
-            } else {
-                BLOCKS[3]
-            }
-        })
-        .collect();
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    format!("{bars} {}", display(&Value::from(mean)))
+    let n = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / n;
+    let spread = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt();
+    if spread == 0.0 || !spread.is_finite() {
+        return round_number(mean);
+    }
+    format!("{} ±{}", round_number(mean), round_number(spread))
+}
+
+/// A number with four significant digits (`0.123456` -> `0.1235`, `12345.6` -> `12346`).
+pub fn round_number(number: f64) -> String {
+    if !number.is_finite() || number == 0.0 {
+        return number.to_string();
+    }
+    let magnitude = number.abs().log10().floor() as i32;
+    let decimals = (3 - magnitude).clamp(0, 12) as usize;
+    let text = format!("{number:.decimals$}");
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        text
+    }
+}
+
+/// How a value is written in a table cell: long decimals are rounded, everything else as is.
+fn display_rounded(value: &Value) -> String {
+    match value {
+        Value::Number(n) if !n.is_i64() && !n.is_u64() => match n.as_f64() {
+            // Already short: keep the way it was written (`2.0`).
+            Some(f) if round_number(f).parse::<f64>() == Ok(f) => n.to_string(),
+            Some(f) => round_number(f),
+            None => n.to_string(),
+        },
+        other => display(other),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -582,8 +598,16 @@ fn flush_run<'a>(run: &mut Vec<&'a Row>, out: &mut Vec<&'a Row>, by: Option<&(Co
 pub fn cell_text(row: &Row, column: &Column) -> String {
     match column {
         Column::Name => row.label.clone(),
-        Column::Param(label) => row.params.get(label).map(display).unwrap_or_default(),
-        Column::Metric(label) => row.metrics.get(label).map(display).unwrap_or_default(),
+        Column::Param(label) => row
+            .params
+            .get(label)
+            .map(display_rounded)
+            .unwrap_or_default(),
+        Column::Metric(label) => row
+            .metrics
+            .get(label)
+            .map(display_rounded)
+            .unwrap_or_default(),
         Column::Spread(key) => sparkline(&series_values(row, key)),
         Column::Duration => row
             .run_secs
@@ -1476,6 +1500,18 @@ mod tests {
         assert!(same.is_empty());
     }
 
+    #[test]
+    fn long_decimals_are_rounded_in_cells_but_short_values_are_left_alone() {
+        assert_eq!(round_number(0.123456789), "0.1235");
+        assert_eq!(round_number(12345.678), "12346");
+        assert_eq!(round_number(0.000123456), "0.0001235");
+        assert_eq!(round_number(0.5), "0.5");
+        assert_eq!(display_rounded(&Value::from(0.123456789)), "0.1235");
+        assert_eq!(display_rounded(&Value::from(2.0)), "2.0");
+        assert_eq!(display_rounded(&Value::from(7)), "7");
+        assert_eq!(display_rounded(&Value::from("0.123456789")), "0.123456789");
+    }
+
     fn folds_table() -> Table {
         let json = r#"[
           {"rev": "workspace", "name": null, "data": {"timestamp": null, "params": {},
@@ -1511,8 +1547,8 @@ mod tests {
             ]
         );
         let spread = &folded[1];
-        assert_eq!(cell_text(&table.rows[0], spread), "▁█▅ 2.0");
-        assert_eq!(cell_text(&table.rows[1], spread), "▄▄▄ 2.0");
+        assert_eq!(cell_text(&table.rows[0], spread), "2 ±0.8165");
+        assert_eq!(cell_text(&table.rows[1], spread), "2");
         assert_eq!(spread.group(), Some("m.json:by_fold.*"));
         assert_eq!(spread.short_title(), "rmse");
         assert_eq!(Column::from_key(&spread.to_key()), Some(spread.clone()));

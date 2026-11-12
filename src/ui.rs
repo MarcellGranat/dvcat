@@ -546,9 +546,14 @@ fn render_stage_list(app: &App, frame: &mut Frame, area: Rect) {
     let focused = app.focus == Focus::Stages;
     // Inside the border and the two-cell selection marker.
     let list_width = usize::from(area.width.saturating_sub(4));
-    let items: Vec<ListItem> = (0..app.stage_count())
-        .filter_map(|position| {
+    let visible = app.visible_positions();
+    let items: Vec<ListItem> = visible
+        .iter()
+        .filter_map(|&position| {
             let stage = app.stage_at(position)?;
+            if let Some((group, members)) = app.collapsed_members(position) {
+                return Some(group_item(app, &group, &members, list_width));
+            }
             let (glyph, _, color) = badge(app.status_at(position).map(|s| s.status()));
             let warning = if stage.unsupported.is_some() {
                 format!(" {WARNING}")
@@ -586,10 +591,55 @@ fn render_stage_list(app: &App, frame: &mut Frame, area: Rect) {
         })
         .highlight_symbol("▌ ");
     // ListState is a small scratch value rebuilt each frame from our own state.
-    let mut state = ListState::default().with_selected(Some(app.selected));
+    let row = visible
+        .iter()
+        .rposition(|&p| p <= app.selected)
+        .unwrap_or(0);
+    let mut state = ListState::default().with_selected(Some(row));
     app.experiments.hits.stages.set(area);
     frame.render_stateful_widget(list, area, &mut state);
     app.experiments.hits.stages_offset.set(state.offset());
+}
+
+/// One row standing for a folded group: `▸ split ×10`, with how many of its stages are in each state.
+fn group_item(app: &App, group: &str, members: &[usize], width: usize) -> ListItem<'static> {
+    let statuses: Vec<Option<Status>> = members
+        .iter()
+        .map(|&p| app.status_at(p).map(|s| s.status()))
+        .collect();
+    let worst = [Status::NeverRun, Status::Stale, Status::Unverified]
+        .into_iter()
+        .find(|w| statuses.contains(&Some(*w)))
+        .or_else(|| {
+            statuses
+                .iter()
+                .all(Option::is_some)
+                .then_some(Status::UpToDate)
+        });
+    let (glyph, _, color) = badge(worst);
+    let left = format!(" ▸ {group} ×{}", members.len());
+    let mut spans = vec![
+        Span::styled(glyph, Style::new().fg(color)),
+        Span::raw(left.clone()),
+    ];
+    let mut counts = String::new();
+    for status in [
+        Status::UpToDate,
+        Status::Stale,
+        Status::NeverRun,
+        Status::Unverified,
+    ] {
+        let n = statuses.iter().filter(|s| **s == Some(status)).count();
+        if n > 0 && n < members.len() {
+            counts.push_str(&format!(" {}{n}", badge(Some(status)).0));
+        }
+    }
+    let used = glyph.chars().count() + left.chars().count();
+    if let Some(gap) = width.checked_sub(used + counts.chars().count() + 1) {
+        spans.push(Span::raw(" ".repeat(gap + 1)));
+        spans.push(Span::styled(counts, theme::muted()));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 fn render_files(app: &App, files: &[FileEntry], frame: &mut Frame, area: Rect) {
@@ -1756,8 +1806,38 @@ mod tests {
     }
 
     #[test]
+    fn a_group_of_stages_is_one_row_until_it_is_opened_with_z() {
+        let mut app = with_statuses(app_at(&fixture("matrix")));
+        let text = render(&app, 100, 20).join("\n");
+        assert!(text.contains("▸ grid ×4"), "{text}");
+        assert!(!text.contains("grid@lin-1"), "{text}");
+        assert!(text.contains("each@us"), "groups of two stay open:\n{text}");
+        // Moving down from the folded row skips the hidden members.
+        let grid = app
+            .visible_positions()
+            .into_iter()
+            .find(|&p| app.stage_at(p).is_some_and(|s| s.name.starts_with("grid@")));
+        app.selected = grid.unwrap();
+        app.update(crate::app::Event::Key(
+            ratatui::crossterm::event::KeyEvent::from(ratatui::crossterm::event::KeyCode::Char(
+                'j',
+            )),
+        ));
+        assert_eq!(app.selected_stage().unwrap().name, "collect");
+        app.selected = grid.unwrap();
+        app.update(crate::app::Event::Key(
+            ratatui::crossterm::event::KeyEvent::from(ratatui::crossterm::event::KeyCode::Char(
+                'z',
+            )),
+        ));
+        let text = render(&app, 100, 20).join("\n");
+        assert!(text.contains("grid@win-2"), "{text}");
+    }
+
+    #[test]
     fn expanded_stages_are_listed_by_their_dvc_names_in_dependency_order() {
-        let app = with_statuses(app_at(&fixture("matrix")));
+        let mut app = with_statuses(app_at(&fixture("matrix")));
+        app.collapsed.clear();
         let rows = render(&app, 100, 20);
         let text = rows.join("\n");
         for name in ["each@us", "each@eu", "grid@lin-1", "grid@win-2", "collect"] {

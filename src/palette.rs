@@ -104,6 +104,12 @@ pub const ENTRIES: &[Entry] = &[
         KeyCode::Tab,
         "go to the files of the stage",
     ),
+    key(
+        Pipeline,
+        "z",
+        'z',
+        "fold or open a group of stages (name@key)",
+    ),
     key(Pipeline, "r", 'r', "run the selected stage"),
     key(
         Pipeline,
@@ -183,7 +189,7 @@ pub const ENTRIES: &[Entry] = &[
         Experiments,
         "F",
         'F',
-        "fold or unfold the by_fold metrics into one sparkline",
+        "fold or unfold the by_fold metrics into one mean ±spread column",
     ),
     key(Experiments, "-", '-', "hide the cursor's column"),
     key(Experiments, "+", '+', "show the hidden columns again"),
