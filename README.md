@@ -80,7 +80,7 @@ If none is found, pressing `r` explains where it looked.
 | `=`        | *(experiments)* compare two rows: the two marked ones, or the marked one and the cursor row. Only params and metrics that differ are listed, with the change and a `♛` on the one that is ahead; `x` swaps the sides |
 | `f`        | *(experiments)* pin the column under the cursor to the left (it stays on screen however far you scroll, and ignores the scope and filter); again unpins |
 | `F`        | *(experiments)* numbered metrics (`by_fold.0.rmse`, `by_fold.1.rmse`, ...) are folded into one column with the mean and the spread (`0.1234 ±0.012`); `F` shows them one by one. Long decimals in cells are rounded to four significant digits |
-| `z`        | *(pipeline)* a group of stages (`split@0`, `split@1`, ... from `foreach`/`matrix`) with three or more members starts folded into one row (`▸ split ×10`); `z` opens or folds it; `r`/`R` on a folded row runs all its stages in one `dvc repro` |
+| `z`        | *(pipeline)* a group of stages (`split@0`, `split@1`, ... from `foreach`/`matrix`) with three or more members starts folded into one row (`▸ split ×10`); `z` opens or folds it; `r`/`R` on a folded row runs all its stages in one `dvc repro` (`R` asks first) |
 | `y` / `Y`  | *(experiments)* copy the cell / the whole row as JSON to the clipboard (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or the terminal's OSC 52) |
 | `E`        | *(experiments)* write the table as it is sorted and filtered to `dvcat-experiments.csv` in the project |
 | `o`        | on a stage: open its script (or params file) in `$EDITOR`; *(experiments)* open the file of the column under the cursor |

@@ -1853,6 +1853,24 @@ mod tests {
         assert_eq!(&args[..2], ["repro", "--single-item"]);
         assert_eq!(args.len(), 2 + 4);
         assert!(args[2..].iter().all(|a| a.starts_with("grid@")), "{args:?}");
+        // R asks first, then y starts the same command with the upstream.
+        let mut app = app_at(&fixture("matrix"));
+        app.selected = (0..app.stage_count())
+            .find(|&p| app.stage_at(p).unwrap().name.starts_with("grid@"))
+            .unwrap();
+        let key = |c| {
+            crate::app::Event::Key(ratatui::crossterm::event::KeyEvent::from(
+                ratatui::crossterm::event::KeyCode::Char(c),
+            ))
+        };
+        assert!(app.update(key('R')).is_empty());
+        assert!(app.confirm.is_some());
+        let effects = app.update(key('y'));
+        assert!(matches!(
+            effects.as_slice(),
+            [crate::app::Effect::StartRun { .. }]
+        ));
+        assert_eq!(app.run.as_ref().unwrap().args[1], "grid@lin-1");
     }
 
     #[test]

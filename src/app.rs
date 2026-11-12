@@ -2526,7 +2526,7 @@ impl App {
         }]
     }
 
-    /// `r`/`R` on a folded group: one `dvc repro` for all its stages, without asking first.
+    /// `r`/`R` on a folded group: one `dvc repro` for all its stages (`R` asks first).
     fn request_group_run(
         &mut self,
         group: &str,
@@ -2550,7 +2550,35 @@ impl App {
         if !with_upstream {
             args.push("--single-item".to_owned());
         }
-        args.extend(names);
+        args.extend(names.iter().cloned());
+        if with_upstream && self.confirm.is_none() && !self.confirm_skipped {
+            let estimate = (!known.is_empty()).then(|| known.iter().sum());
+            let mut lines = vec![format!("dvc {}", args.join(" "))];
+            lines.push(format!(
+                "Runs the {} stages of '{group}' and every stale stage upstream of them.",
+                names.len()
+            ));
+            lines.push("DVC skips the ones that are up to date.".to_owned());
+            lines.push(match estimate {
+                Some(total) => format!(
+                    "About {} going by the last runs of the members.",
+                    format_duration(total)
+                ),
+                None => "No earlier run is known, so there is no time estimate.".to_owned(),
+            });
+            self.confirm = Some(Confirm {
+                title: format!("Run {label} with their upstream?"),
+                lines,
+                label,
+                args,
+                kill: Vec::new(),
+                toggles: Vec::new(),
+                targets: None,
+                stage_run: Some((group.to_owned(), true)),
+                estimate,
+            });
+            return Vec::new();
+        }
         let mut run = Run::with_args(label.clone(), args, with_upstream, RunKind::Stage);
         run.estimate = if known.is_empty() {
             self.last_runs.get(&label).map(|last| last.duration)
