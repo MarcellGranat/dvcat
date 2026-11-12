@@ -220,7 +220,11 @@ fn dep_reasons(stage: &Stage, locked: &LockStage, root: &Path) -> Vec<Reason> {
         if !on_disk.exists() {
             reasons.push(Reason::DepMissing { path: dep.clone() });
         } else if on_disk.is_dir() || locked_md5.is_some_and(|m| m.ends_with(".dir")) {
-            reasons.push(Reason::DirUnverified { path: dep.clone() });
+            match locked_md5.map(|m| check_directory(root, &on_disk, m)) {
+                Some(DirCheck::Same) => {}
+                Some(DirCheck::Changed) => reasons.push(Reason::DepChanged { path: dep.clone() }),
+                _ => reasons.push(Reason::DirUnverified { path: dep.clone() }),
+            }
         } else {
             match md5_of_file(&on_disk) {
                 Ok(now) if Some(now.as_str()) == locked_md5 => {}
@@ -267,7 +271,11 @@ fn out_reasons(stage: &Stage, locked: &LockStage, root: &Path, hash_limit: u64) 
             continue;
         };
         if metadata.is_dir() || locked_md5.ends_with(".dir") {
-            reasons.push(Reason::OutUnverified { path });
+            match check_directory(root, &on_disk, locked_md5) {
+                DirCheck::Same => {}
+                DirCheck::Changed => reasons.push(Reason::OutModified { path }),
+                DirCheck::Unknown => reasons.push(Reason::OutUnverified { path }),
+            }
         } else if entry.size.is_some_and(|size| size != metadata.len()) {
             reasons.push(Reason::OutModified { path });
         } else if metadata.len() > hash_limit {
@@ -281,6 +289,172 @@ fn out_reasons(stage: &Stage, locked: &LockStage, root: &Path, hash_limit: u64) 
         }
     }
     reasons
+}
+
+/// What comparing a directory with the listing DVC cached for it found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirCheck {
+    Same,
+    Changed,
+    /// No listing in the cache, too much to read, or files we cannot tell apart from ignored ones.
+    Unknown,
+}
+
+/// Most bytes read to check one directory; bigger ones stay unverified.
+const DIR_HASH_LIMIT: u64 = 512 * 1024 * 1024;
+
+/// Names DVC projects usually ignore; extra files of this kind do not count as a change.
+const IGNORED_NAMES: [&str; 5] = [
+    ".DS_Store",
+    "__pycache__",
+    ".git",
+    ".ipynb_checkpoints",
+    ".jj",
+];
+
+/// A directory's md5 (`<hash>.dir`) is the hash of a listing of its files that DVC keeps in its
+/// cache. Compare that listing with the files on disk: same files with the same hashes is the same
+/// directory. The listing is only in the cache once the data was added or run here (or pulled).
+fn check_directory(root: &Path, on_disk: &Path, locked_md5: &str) -> DirCheck {
+    let Some(hash) = locked_md5.strip_suffix(".dir") else {
+        return DirCheck::Unknown;
+    };
+    if hash.len() < 3 {
+        return DirCheck::Unknown;
+    }
+    let (head, tail) = hash.split_at(2);
+    let listing = [
+        root.join(format!(".dvc/cache/files/md5/{head}/{tail}.dir")),
+        root.join(format!(".dvc/cache/{head}/{tail}.dir")),
+    ]
+    .into_iter()
+    .find_map(|path| fs::read_to_string(path).ok());
+    let Some(listing) = listing else {
+        return recomputed_listing_matches(on_disk, hash);
+    };
+    let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&listing) else {
+        return DirCheck::Unknown;
+    };
+    let mut expected: BTreeMap<String, String> = BTreeMap::new();
+    for entry in &entries {
+        let (Some(md5), Some(relpath)) = (
+            entry.get("md5").and_then(Value::as_str),
+            entry.get("relpath").and_then(Value::as_str),
+        ) else {
+            return DirCheck::Unknown;
+        };
+        expected.insert(relpath.to_owned(), md5.to_owned());
+    }
+    let mut present = Vec::new();
+    collect_files(on_disk, on_disk, &mut present);
+    let mut budget = DIR_HASH_LIMIT;
+    let mut extra = false;
+    for relpath in &present {
+        if !expected.contains_key(relpath) {
+            extra = true;
+        }
+    }
+    for (relpath, md5) in &expected {
+        let file = on_disk.join(relpath);
+        let Ok(metadata) = fs::metadata(&file) else {
+            return DirCheck::Changed;
+        };
+        budget = match budget.checked_sub(metadata.len()) {
+            Some(left) => left,
+            None => return DirCheck::Unknown,
+        };
+        match md5_of_file(&file) {
+            Ok(now) if now == *md5 => {}
+            _ => return DirCheck::Changed,
+        }
+    }
+    // Files DVC did not list may be ignored by `.dvcignore`, which we do not read: say so.
+    if extra {
+        DirCheck::Unknown
+    } else {
+        DirCheck::Same
+    }
+}
+
+/// Without a cached listing, build it from the files (as DVC does: entries sorted by path, written
+/// as JSON) and see whether it hashes to the locked value. A match proves nothing changed; a
+/// mismatch proves little (ignored files, other formats), so it stays unknown.
+fn recomputed_listing_matches(on_disk: &Path, hash: &str) -> DirCheck {
+    let mut present = Vec::new();
+    collect_files(on_disk, on_disk, &mut present);
+    present.sort();
+    let mut budget = DIR_HASH_LIMIT;
+    let mut entries = Vec::new();
+    for relpath in present {
+        let file = on_disk.join(&relpath);
+        let Ok(metadata) = fs::metadata(&file) else {
+            return DirCheck::Unknown;
+        };
+        budget = match budget.checked_sub(metadata.len()) {
+            Some(left) => left,
+            None => return DirCheck::Unknown,
+        };
+        let Ok(md5) = md5_of_file(&file) else {
+            return DirCheck::Unknown;
+        };
+        entries.push(format!(
+            r#"{{"md5": "{md5}", "relpath": {}}}"#,
+            json_string(&relpath)
+        ));
+    }
+    let listing = format!("[{}]", entries.join(", "));
+    let mut hasher = Md5::new();
+    hasher.update(listing.as_bytes());
+    let now: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if now == hash {
+        DirCheck::Same
+    } else {
+        DirCheck::Unknown
+    }
+}
+
+fn json_string(text: &str) -> String {
+    // Python's json.dumps escapes non-ASCII as \uXXXX; serde_json does not.
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                let mut units = [0u16; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Every file below `dir` as a `/`-separated path relative to `base`, without the usual clutter.
+fn collect_files(base: &Path, dir: &Path, found: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if IGNORED_NAMES.contains(&name.as_str()) || name.ends_with(".pyc") {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(base, &path, found);
+        } else if let Ok(relative) = path.strip_prefix(base) {
+            let parts: Vec<_> = relative.iter().map(|p| p.to_string_lossy()).collect();
+            found.push(parts.join("/"));
+        }
+    }
 }
 
 fn md5_of_file(path: &Path) -> io::Result<String> {
@@ -579,6 +753,87 @@ mod tests {
             texts(of(&project, &statuses, "prepare")),
             ["dependency removed: data/raw.csv"]
         );
+    }
+
+    /// A project with `inputs/a.txt` whose directory listing is in the cache.
+    fn dir_project(listing_md5: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("inputs")).unwrap();
+        fs::write(root.join("inputs/a.txt"), "hello\n").unwrap();
+        let file_md5 = md5_of_file(&root.join("inputs/a.txt")).unwrap();
+        fs::create_dir_all(root.join(".dvc/cache/files/md5/ab")).unwrap();
+        fs::write(
+            root.join(".dvc/cache/files/md5/ab/cdef.dir"),
+            format!(r#"[{{"md5": "{file_md5}", "relpath": "a.txt"}}]"#),
+        )
+        .unwrap();
+        fs::write(
+            root.join("dvc.yaml"),
+            "stages:\n  a:\n    cmd: x\n    deps: [inputs]\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("dvc.lock"),
+            format!("schema: '2.0'\nstages:\n  a:\n    cmd: x\n    deps:\n    - path: inputs\n      md5: {listing_md5}\n"),
+        )
+        .unwrap();
+        (dir, root)
+    }
+
+    #[test]
+    fn a_directory_matching_its_cached_listing_is_up_to_date() {
+        let (_dir, root) = dir_project("abcdef.dir");
+        let (project, statuses) = statuses(&root);
+        assert_eq!(of(&project, &statuses, "a").status(), Status::UpToDate);
+    }
+
+    #[test]
+    fn without_a_cached_listing_the_directory_hash_is_recomputed() {
+        let (_dir, root) = dir_project("abcdef.dir");
+        fs::remove_dir_all(root.join(".dvc")).unwrap();
+        let (project, found) = statuses(&root);
+        assert_eq!(of(&project, &found, "a").status(), Status::Unverified);
+        // The hash of `[{"md5": <md5 of "hello\n">, "relpath": "a.txt"}]`.
+        let md5 = md5_of_file(&root.join("inputs/a.txt")).unwrap();
+        let mut hasher = Md5::new();
+        hasher.update(format!(r#"[{{"md5": "{md5}", "relpath": "a.txt"}}]"#).as_bytes());
+        let hash: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let lock = fs::read_to_string(root.join("dvc.lock")).unwrap();
+        fs::write(
+            root.join("dvc.lock"),
+            lock.replace("abcdef.dir", &format!("{hash}.dir")),
+        )
+        .unwrap();
+        let (project, found) = statuses(&root);
+        assert_eq!(of(&project, &found, "a").status(), Status::UpToDate);
+    }
+
+    #[test]
+    fn a_changed_file_in_a_listed_directory_makes_the_stage_stale() {
+        let (_dir, root) = dir_project("abcdef.dir");
+        fs::write(root.join("inputs/a.txt"), "changed\n").unwrap();
+        let (project, statuses) = statuses(&root);
+        let a = of(&project, &statuses, "a");
+        assert_eq!(a.status(), Status::Stale);
+        assert_eq!(texts(a), ["changed: inputs"]);
+    }
+
+    #[test]
+    fn extra_files_leave_a_directory_unverified_except_known_clutter() {
+        let (_dir, root) = dir_project("abcdef.dir");
+        fs::create_dir(root.join("inputs/__pycache__")).unwrap();
+        fs::write(root.join("inputs/__pycache__/x.pyc"), "x").unwrap();
+        fs::write(root.join("inputs/.DS_Store"), "x").unwrap();
+        let (project, found) = statuses(&root);
+        assert_eq!(of(&project, &found, "a").status(), Status::UpToDate);
+        fs::write(root.join("inputs/new.txt"), "x").unwrap();
+        let (project, found) = statuses(&root);
+        assert_eq!(of(&project, &found, "a").status(), Status::Unverified);
     }
 
     #[test]
