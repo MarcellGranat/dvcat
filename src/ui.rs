@@ -1835,6 +1835,27 @@ mod tests {
     }
 
     #[test]
+    fn running_a_folded_group_repros_every_member_in_one_command() {
+        let mut app = app_at(&fixture("matrix"));
+        app.selected = (0..app.stage_count())
+            .find(|&p| app.stage_at(p).unwrap().name.starts_with("grid@"))
+            .unwrap();
+        let effects = app.update(crate::app::Event::Key(
+            ratatui::crossterm::event::KeyEvent::from(ratatui::crossterm::event::KeyCode::Char(
+                'r',
+            )),
+        ));
+        assert!(matches!(
+            effects.as_slice(),
+            [crate::app::Effect::StartRun { .. }]
+        ));
+        let args = &app.run.as_ref().unwrap().args;
+        assert_eq!(&args[..2], ["repro", "--single-item"]);
+        assert_eq!(args.len(), 2 + 4);
+        assert!(args[2..].iter().all(|a| a.starts_with("grid@")), "{args:?}");
+    }
+
+    #[test]
     fn expanded_stages_are_listed_by_their_dvc_names_in_dependency_order() {
         let mut app = with_statuses(app_at(&fixture("matrix")));
         app.collapsed.clear();

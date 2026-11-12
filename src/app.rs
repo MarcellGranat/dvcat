@@ -2502,11 +2502,8 @@ impl App {
             return Vec::new();
         }
         let name = stage.name.clone();
-        if self.collapsed_members(self.selected).is_some() {
-            self.notice = Some(format!(
-                "'{name}' stands for a folded group: z opens it, then run one stage"
-            ));
-            return Vec::new();
+        if let Some((group, members)) = self.collapsed_members(self.selected) {
+            return self.request_group_run(&group, &members, with_upstream);
         }
         if let Some(reason) = self.blocked_by_outside_run(with_upstream) {
             self.notice = Some(format!("cannot run '{name}': {reason} (X stops it)"));
@@ -2525,6 +2522,44 @@ impl App {
         self.run = Some(run);
         vec![Effect::StartRun {
             stage: name,
+            with_upstream,
+        }]
+    }
+
+    /// `r`/`R` on a folded group: one `dvc repro` for all its stages, without asking first.
+    fn request_group_run(
+        &mut self,
+        group: &str,
+        members: &[usize],
+        with_upstream: bool,
+    ) -> Vec<Effect> {
+        let names: Vec<String> = members
+            .iter()
+            .filter_map(|&p| self.stage_at(p).map(|s| s.name.clone()))
+            .collect();
+        if let Some(reason) = self.blocked_by_outside_run(with_upstream) {
+            self.notice = Some(format!("cannot run '{group}': {reason} (X stops it)"));
+            return Vec::new();
+        }
+        let label = format!("{group} ×{}", names.len());
+        let known: Vec<Duration> = names
+            .iter()
+            .filter_map(|n| self.last_runs.get(n).map(|last| last.duration))
+            .collect();
+        let mut args = vec!["repro".to_owned()];
+        if !with_upstream {
+            args.push("--single-item".to_owned());
+        }
+        args.extend(names);
+        let mut run = Run::with_args(label.clone(), args, with_upstream, RunKind::Stage);
+        run.estimate = if known.is_empty() {
+            self.last_runs.get(&label).map(|last| last.duration)
+        } else {
+            Some(known.iter().sum())
+        };
+        self.run = Some(run);
+        vec![Effect::StartRun {
+            stage: label,
             with_upstream,
         }]
     }
