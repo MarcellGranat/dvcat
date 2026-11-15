@@ -578,6 +578,12 @@ fn render_stage_list(app: &App, frame: &mut Frame, area: Rect) {
                     spans.push(Span::raw(" ".repeat(gap + 1)));
                     spans.push(Span::styled(time, theme::muted()));
                 }
+            } else if let Some(text) = experiment_hint(app, &stage.name) {
+                let used = glyph.chars().count() + left.chars().count();
+                if let Some(gap) = list_width.checked_sub(used + text.chars().count() + 1) {
+                    spans.push(Span::raw(" ".repeat(gap + 1)));
+                    spans.push(Span::styled(text, theme::muted()));
+                }
             }
             Some(ListItem::new(Line::from(spans)))
         })
@@ -599,6 +605,15 @@ fn render_stage_list(app: &App, frame: &mut Frame, area: Rect) {
     app.experiments.hits.stages.set(area);
     frame.render_stateful_widget(list, area, &mut state);
     app.experiments.hits.stages_offset.set(state.offset());
+}
+
+/// `exp ×38` for a stage the workspace lock has never seen but experiments ran.
+fn experiment_hint(app: &App, name: &str) -> Option<String> {
+    let count = *app.in_experiments.get(name)?;
+    let index = app.project.stages.iter().position(|s| s.name == name)?;
+    let position = app.graph.order.iter().position(|&o| o == index)?;
+    let status = app.status_at(position).map(|s| s.status());
+    (status == Some(Status::NeverRun)).then(|| format!("exp ×{count}"))
 }
 
 /// One row standing for a folded group: `▸ split ×10`, with how many of its stages are in each state.
@@ -633,6 +648,15 @@ fn group_item(app: &App, group: &str, members: &[usize], width: usize) -> ListIt
         if n > 0 && n < members.len() {
             counts.push_str(&format!(" {}{n}", badge(Some(status)).0));
         }
+    }
+    if counts.is_empty()
+        && worst == Some(Status::NeverRun)
+        && members.iter().all(|&p| {
+            app.stage_at(p)
+                .is_some_and(|s| experiment_hint(app, &s.name).is_some())
+        })
+    {
+        counts = " ran in experiments".to_owned();
     }
     let used = glyph.chars().count() + left.chars().count();
     if let Some(gap) = width.checked_sub(used + counts.chars().count() + 1) {
@@ -1082,6 +1106,17 @@ fn detail_lines(app: &App) -> Vec<Line<'static>> {
     if let Some(status) = status {
         let why = status.reasons.iter().map(ToString::to_string).collect();
         lines.extend(section("why", why, Style::new().fg(theme::YELLOW)));
+    }
+    if let Some(count) = app.in_experiments.get(&stage.name)
+        && status.is_some_and(|s| s.status() == Status::NeverRun)
+    {
+        lines.push(Line::from(vec![
+            label_span("experiments"),
+            Span::styled(
+                format!("ran in {count} experiment(s); the workspace lock has no entry"),
+                theme::muted(),
+            ),
+        ]));
     }
     if let Some(last) = app.last_runs.get(&stage.name) {
         let (text, color) = outcome_label(&last.outcome);
@@ -1871,6 +1906,16 @@ mod tests {
             [crate::app::Effect::StartRun { .. }]
         ));
         assert_eq!(app.run.as_ref().unwrap().args[1], "grid@lin-1");
+    }
+
+    #[test]
+    fn stages_that_only_ran_in_experiments_say_so() {
+        let mut app = with_statuses(app_at(&fixture("matrix")));
+        app.in_experiments.insert("collect".to_owned(), 3);
+        app.selected = app.stage_count() - 1;
+        let text = render(&app, 100, 20).join("\n");
+        assert!(text.contains("exp ×3"), "{text}");
+        assert!(text.contains("ran in 3 experiment"), "{text}");
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod config;
 pub mod dag;
 pub mod dvc_yaml;
+pub mod exp_stages;
 pub mod expand;
 pub mod experiments;
 pub mod external;

@@ -15,7 +15,7 @@ use ratatui::crossterm::event::{
 
 use crate::{
     dag::{self, Layout, Move},
-    dvc_yaml,
+    dvc_yaml, exp_stages,
     experiments::{self, ColumnQuery, RowKind, Scope, Sort, Table},
     external,
     files::{self, FileEntry, Preview, PreviewBody},
@@ -56,6 +56,8 @@ pub enum Event {
     Remotes(Transfer, Result<Vec<Remote>, String>),
     /// Result of a background stale check, indexed like `project.stages`.
     Statuses(Vec<StageStatus>),
+    /// Stage name -> number of experiments it ran in (read from their locks in the background).
+    ExperimentStages(BTreeMap<String, usize>),
     /// A chunk of the running command's combined stdout/stderr.
     RunOutput(String),
     /// The run ended (or never started). Always the last event of a run.
@@ -548,6 +550,8 @@ pub struct App {
     pub started: Instant,
     /// The latest finished run of each stage started from this session (DVC keeps no durations).
     pub last_runs: BTreeMap<String, LastRun>,
+    /// Stage name -> in how many experiments it ran; the workspace lock does not know of those.
+    pub in_experiments: BTreeMap<String, usize>,
     /// Seconds each experiment took, by name, for the experiments table.
     pub experiment_times: BTreeMap<String, f64>,
     /// Whether run times are read from and written to the project's history file (`main` turns it on).
@@ -625,6 +629,7 @@ impl App {
             notice_since: None,
             started: Instant::now(),
             last_runs: BTreeMap::new(),
+            in_experiments: BTreeMap::new(),
             experiment_times: BTreeMap::new(),
             persist_history: false,
             file_cursor: 0,
@@ -858,6 +863,11 @@ impl App {
         let project = self.project.clone();
         let graph = self.graph.clone();
         let tx = tx.clone();
+        let root = self.project.root.clone();
+        let experiments_tx = tx.clone();
+        thread::spawn(move || {
+            let _ = experiments_tx.send(Event::ExperimentStages(exp_stages::count(&root)));
+        });
         thread::spawn(move || {
             let statuses = stale::compute(&project, &graph);
             // Err means the app already quit; there is nobody left to tell.
@@ -927,6 +937,10 @@ impl App {
             }
             Event::Statuses(statuses) => {
                 self.statuses = Some(statuses);
+                Vec::new()
+            }
+            Event::ExperimentStages(counts) => {
+                self.in_experiments = counts;
                 Vec::new()
             }
             Event::RunOutput(text) => {
