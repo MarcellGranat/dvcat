@@ -132,10 +132,21 @@ pub const ENTRIES: &[Entry] = &[
     key(Files, "r", 'r', "run the stage"),
     // Graph
     info(Dag, "h/j/k/l", "move between stages"),
+    code(
+        Dag,
+        "Enter",
+        KeyCode::Enter,
+        "open the stage in the pipeline view",
+    ),
     key(Dag, "r", 'r', "run the stage"),
+    key(Dag, "R", 'R', "run the stage with its upstream"),
+    key(Dag, "n", 'n', "new stage"),
+    key(Dag, "g", 'g', "back to the pipeline"),
     // Plots
     info(Plots, "j/k", "choose a plot"),
     key(Plots, "n", 'n', "new plot"),
+    key(Plots, "d", 'd', "show the plot's definition from dvc.yaml"),
+    code(Plots, "F5", KeyCode::F(5), "reload the plots"),
     // Experiments
     info(Experiments, "j/k h/l", "move the cursor"),
     key(
@@ -239,6 +250,12 @@ pub const ENTRIES: &[Entry] = &[
     key(Experiments, "c", 'c', "comment on the experiment"),
     key(Experiments, "d", 'd', "remove the experiment"),
     code(Experiments, "F5", KeyCode::F(5), "refresh"),
+    code(
+        Experiments,
+        "Esc",
+        KeyCode::Esc,
+        "undo one layer: the row filter, the marks, then the view",
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

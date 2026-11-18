@@ -34,29 +34,8 @@ use crate::{
 const LABEL_WIDTH: usize = 9;
 const WARNING: &str = "⚠";
 /// Key hints for the footer: `(key, what it does)`.
-const PIPELINE_KEYS: &[(&str, &str)] = &[
-    ("j/k", "move"),
-    ("Tab", "files"),
-    ("r", "run"),
-    ("R", "run+upstream"),
-    ("n", "new stage"),
-    ("x", "cancel"),
-    ("P/U", "pull/push"),
-    ("PgUp/PgDn", "log"),
-    ("g", "graph"),
-    ("e", "experiments"),
-    ("q", "quit"),
-];
-const FILES_KEYS: &[(&str, &str)] = &[
-    ("j/k", "move"),
-    ("Enter", "preview"),
-    ("o", "editor"),
-    ("Tab", "stages"),
-    ("r", "run"),
-    ("g", "graph"),
-    ("e", "experiments"),
-    ("q", "quit"),
-];
+/// On the main screens the bottom line only points to the list of keys (`?`).
+const MAIN_KEYS: &[(&str, &str)] = &[("?", "keys")];
 const PREVIEW_KEYS: &[(&str, &str)] = &[
     ("j/k", "scroll"),
     ("PgUp/PgDn", "page"),
@@ -105,72 +84,6 @@ const PALETTE_KEYS: &[(&str, &str)] = &[
     ("Esc", "close"),
 ];
 const CONFIRM_KEYS: &[(&str, &str)] = &[("y/Enter", "yes"), ("n/Esc", "no")];
-const DAG_KEYS: &[(&str, &str)] = &[
-    ("h/l", "upstream/downstream"),
-    ("j/k", "same layer"),
-    ("Enter", "open stage"),
-    ("n", "new stage"),
-    ("r", "run"),
-    ("R", "run+upstream"),
-    ("x", "cancel"),
-    ("g/Esc", "back"),
-    ("e", "experiments"),
-    ("q", "quit"),
-];
-const PLOTS_KEYS: &[(&str, &str)] = &[
-    ("j/k", "plot"),
-    ("d", "definition"),
-    ("n", "new plot"),
-    ("F5", "reload"),
-    ("1", "pipeline"),
-    ("e", "experiments"),
-    ("q", "quit"),
-];
-const FOCUS_KEYS: &[(&str, &str)] = &[
-    ("j/k", "scroll"),
-    ("h/l", "other row"),
-    ("Tab", "params/metrics"),
-    ("u", "unchanged"),
-    ("Esc", "back"),
-];
-const COMPARE_KEYS: &[(&str, &str)] = &[
-    ("j/k", "scroll"),
-    ("x", "swap"),
-    ("Tab", "params/metrics"),
-    ("u", "unchanged"),
-    ("Esc", "back"),
-];
-const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
-    ("j/k", "row"),
-    ("h/l", "column"),
-    ("s", "sort"),
-    ("Tab", "params/metrics"),
-    ("u", "unchanged"),
-    ("{ }", "group"),
-    ("Enter", "focus"),
-    ("Space ,", "mark"),
-    ("T", "best N"),
-    ("=", "compare"),
-    ("?", "all keys"),
-    ("z", "only marked"),
-    ("-/+", "hide/show col"),
-    ("m", "deltas"),
-    ("t", "transpose"),
-    ("c", "comment"),
-    ("p", "plot"),
-    ("[ ]", "metric"),
-    ("v", "params"),
-    ("H", "hide col"),
-    ("n", "new"),
-    ("a", "apply"),
-    ("b", "branch"),
-    ("d", "remove"),
-    ("P/U", "pull/push"),
-    ("F5", "refresh"),
-    ("x", "cancel run"),
-    ("e/Esc", "pipeline"),
-    ("q", "quit"),
-];
 
 /// A rounded pane. `focused` lights up its border and title.
 fn pane<'a>(title: impl Into<String>, focused: bool) -> Block<'a> {
@@ -199,28 +112,19 @@ pub fn view(app: &App, frame: &mut Frame) {
     let keys = match app.view {
         View::Pipeline => {
             render_pipeline(app, frame, main);
-            match app.focus {
-                Focus::Stages => PIPELINE_KEYS,
-                Focus::Files => FILES_KEYS,
-            }
+            MAIN_KEYS
         }
         View::Experiments => {
             experiments::render(app, frame, main);
-            if app.experiments.compare.is_some() {
-                COMPARE_KEYS
-            } else if app.experiments.focus.is_some() {
-                FOCUS_KEYS
-            } else {
-                EXPERIMENTS_KEYS
-            }
+            MAIN_KEYS
         }
         View::Dag => {
             dag::render(app, frame, main);
-            DAG_KEYS
+            MAIN_KEYS
         }
         View::Plots => {
             plots::render(app, frame, main);
-            PLOTS_KEYS
+            MAIN_KEYS
         }
     };
     // The popup floats over everything else.
@@ -1492,14 +1396,14 @@ mod tests {
     fn footer_shows_a_notice_instead_of_the_key_help() {
         let mut app = demo_app();
         let rows = render(&app, 100, 20);
-        assert!(rows[19].contains("r run"), "{rows:#?}");
+        assert!(rows[19].contains("? keys"), "{rows:#?}");
         app.notice = Some("a run is already in progress".into());
         let rows = render(&app, 100, 20);
         assert!(
             rows[19].contains("a run is already in progress"),
             "{rows:#?}"
         );
-        assert!(!rows[19].contains("r run"));
+        assert!(!rows[19].contains("? keys"));
     }
 
     #[test]
@@ -2099,12 +2003,15 @@ mod tests {
     }
 
     #[test]
-    fn graph_footer_lists_its_keys() {
-        let app = graph_app(demo_app());
+    fn the_footer_only_points_to_the_key_list_which_has_the_graph_keys() {
+        let mut app = graph_app(demo_app());
         let rows = render(&app, 120, 20);
+        assert!(rows[19].contains("? keys"), "{rows:#?}");
+        app.palette = Some(crate::palette::Palette::new(crate::palette::Where::Dag));
+        let text = render(&app, 120, 24).join("\n");
         assert!(
-            rows[19].contains("h/l upstream/downstream") && rows[19].contains("Enter open stage"),
-            "{rows:#?}"
+            text.contains("move between stages") && text.contains("open the stage"),
+            "{text}"
         );
     }
 
@@ -2259,7 +2166,7 @@ mod tests {
     }
 
     #[test]
-    fn the_header_numbers_the_views_and_the_footer_mentions_the_graph_key() {
+    fn the_header_numbers_the_views_and_the_footer_points_to_the_keys() {
         let app = demo_app();
         let rows = render(&app, 120, 20);
         assert!(
@@ -2269,10 +2176,7 @@ mod tests {
             "{}",
             rows[0]
         );
-        assert!(rows[19].contains("g graph"), "{}", rows[19]);
-        let mut files = demo_app();
-        files.focus = Focus::Files;
-        assert!(render(&files, 120, 20)[19].contains("g graph"));
+        assert!(rows[19].contains("? keys"), "{}", rows[19]);
     }
 
     #[test]
