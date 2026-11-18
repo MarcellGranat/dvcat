@@ -65,11 +65,10 @@ If none is found, pressing `r` explains where it looked.
 | `Tab` / `Shift+Tab` | *(experiments)* switch between **Params**, **Metrics** and **All**; the title shows which is active and how many columns of how many are on screen. The table starts on the Metrics |
 | *(age)*    | *(experiments)* the `age` column next to the name says how long ago each revision was made (`just now`, `5m ago`, `3h ago`, `2d ago`, `3w ago`, `4mo ago`); `s` on it sorts by time, oldest first, then newest first |
 | `u`        | *(experiments)* show / hide the columns that hold the same value in every row (hidden at first) |
-| `/`        | *(experiments)* filter the columns: only labels that contain all the typed words (any case) stay; empty clears it, `Esc` in the table clears it too |
 | `{` / `}`  | *(experiments)* jump to the previous / next group of columns. The line above the headers names the group (`params.yaml:train`, `metrics/accuracy.json:by_fold.0`), the header is the key inside it |
 | `Space` / `,` | *(experiments)* mark the row under the cursor / mark every row with the same value as the cursor cell (works on any param or metric column, like VisiData's `,`). Marked rows are yellow with a `●` |
 | `z`        | *(experiments)* show only the marked experiments (the workspace and the baselines stay, as the comparison). With nothing marked it marks the rows like the cursor cell first. `z` again shows all |
-| `Esc`      | *(experiments)* undoes one layer at a time: the `z` filter, then the marks, then the `/` column filter, then leaves the view |
+| `Esc`      | *(experiments)* undoes one layer at a time: the `z` filter, then the marks, then leaves the view |
 | `-` / `+`  | *(experiments)* hide the param or metric column under the cursor (`H` does the same) / show all hidden columns again |
 | `Enter`    | *(experiments)* focus on the experiment under the cursor: all its params and metrics in a list, grouped, next to the baseline's value and the change. A `♛` marks the metrics in which it is the best of all rows (ties count). `j`/`k` scroll, `h`/`l` show the previous / next row, `Tab`, `/` and `u` work as in the table, `Esc`, `Enter` or `q` go back |
 | `m`        | *(experiments)* show metrics of experiments as differences from their baseline (`▲ +0.1867`) and back |
@@ -78,7 +77,7 @@ If none is found, pressing `r` explains where it looked.
 | `T`        | *(experiments)* mark the best N rows (asked, 5 by default) of the metric under the cursor; then `z` shows only them |
 | `B`        | *(experiments)* which way the metric under the cursor improves: read from its name, lower or higher (saved in `.dvc/tmp`; the config file can set it too) |
 | `=`        | *(experiments)* compare two rows: the two marked ones, or the marked one and the cursor row. Only params and metrics that differ are listed, with the change and a `♛` on the one that is ahead; `x` swaps the sides |
-| `f`        | *(experiments)* pin the column under the cursor to the left (it stays on screen however far you scroll, and ignores the scope and filter); again unpins |
+| `f`        | *(experiments)* pin the column under the cursor to the left (it stays on screen however far you scroll, and ignores the scope); again unpins |
 | `i`        | *(experiments)* commits no experiment ran on are hidden; `i` shows them again |
 | `F`        | *(experiments)* numbered metrics (`by_fold.0.rmse`, `by_fold.1.rmse`, ...) are folded into one column with the mean and the spread (`0.1234 ±0.012`); `F` shows them one by one. Long decimals in cells are rounded to four significant digits |
 | `z`        | *(pipeline)* a group of stages (`split@0`, `split@1`, ... from `foreach`/`matrix`) with three or more members starts folded into one row (`▸ split ×10`); `z` opens or folds it; `r`/`R` on a folded row runs all its stages in one `dvc repro` (`R` asks first) |
@@ -131,7 +130,7 @@ better:                 # which way a metric improves: its label, or a part of i
   gap: lower
 ```
 
-The experiments table also remembers how you left it (scope, filter, pinned columns, sort, deltas, folded series, hidden columns, metric directions) in `.dvc/tmp/dvcat-history.json` and restores it next time.
+The experiments table also remembers how you left it (scope, pinned columns, sort, deltas, folded series, hidden columns, metric directions) in `.dvc/tmp/dvcat-history.json` and restores it next time.
 
 `R` (run a stage with its upstream) asks first: the command, the stages that are not up to date and will run, and about how long they took the last time. While a stage runs the header shows the time so far next to that estimate.
 

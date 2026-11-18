@@ -447,9 +447,6 @@ fn scope_summary(view: &ExperimentsView, table: &Table) -> String {
         .filter(|column| matches!(column, Column::Param(_) | Column::Metric(_)))
         .count();
     let mut out = format!(" · {} (Tab) · {shown}/{total} columns", tabs.join(" "));
-    if !view.filter.is_empty() {
-        out.push_str(&format!(" · filter \"{}\"", view.filter));
-    }
     if !view.show_unchanged {
         out.push_str(" · unchanged hidden (u)");
     }

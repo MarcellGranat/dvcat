@@ -71,8 +71,6 @@ pub struct SavedView {
     #[serde(default)]
     pub scope: String,
     #[serde(default)]
-    pub filter: String,
-    #[serde(default)]
     pub show_unchanged: bool,
     #[serde(default)]
     pub unfolded: bool,

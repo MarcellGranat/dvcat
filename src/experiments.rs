@@ -135,7 +135,6 @@ pub struct ColumnQuery<'a> {
     /// Keep the columns whose value is the same in every row.
     pub show_unchanged: bool,
     /// Words that must all appear in a column's label (case does not matter).
-    pub filter: &'a str,
     /// Columns kept at the left whatever the scope, the filter or the unchanged ones say.
     pub pinned: &'a BTreeSet<String>,
     /// Draw a series of numbered metrics (`by_fold.0`, `by_fold.1`, ...) as one sparkline column.
@@ -442,7 +441,6 @@ impl Table {
             scope: Scope::All,
             hidden: &BTreeSet::new(),
             show_unchanged: true,
-            filter: "",
             pinned: &BTreeSet::new(),
             fold: false,
         })
@@ -461,15 +459,6 @@ impl Table {
 
     /// The columns on screen: the name, then the params and metrics the query lets through.
     pub fn columns_for(&self, query: &ColumnQuery) -> Vec<Column> {
-        let words: Vec<String> = query
-            .filter
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .collect();
-        let wanted = |label: &str| {
-            let label = label.to_lowercase();
-            words.iter().all(|word| label.contains(word))
-        };
         let keep = |column: &Column| query.show_unchanged || self.varies(column);
         let params = matches!(query.scope, Scope::Params | Scope::All);
         let metrics = matches!(query.scope, Scope::Metrics | Scope::All);
@@ -492,7 +481,7 @@ impl Table {
             if query.hidden.contains(label) {
                 continue;
             }
-            if pinned(label) || (params && wanted(label) && keep(&column)) {
+            if pinned(label) || (params && keep(&column)) {
                 params_out.push(column);
             }
         }
@@ -510,7 +499,7 @@ impl Table {
             if query.hidden.contains(&shown_label) {
                 continue;
             }
-            if pinned(&shown_label) || (metrics && wanted(&shown_label) && keep(&column)) {
+            if pinned(&shown_label) || (metrics && keep(&column)) {
                 metrics_out.push(column);
             }
         }
@@ -1267,7 +1256,7 @@ mod tests {
     fn query<'a>(
         scope: Scope,
         show_unchanged: bool,
-        filter: &'a str,
+        _filter: &'a str,
         hidden: &'a BTreeSet<String>,
     ) -> ColumnQuery<'a> {
         static NONE: BTreeSet<String> = BTreeSet::new();
@@ -1275,7 +1264,6 @@ mod tests {
             scope,
             hidden,
             show_unchanged,
-            filter,
             pinned: &NONE,
             fold: false,
         }
@@ -1306,16 +1294,6 @@ mod tests {
             titles(&varying),
             ["name", "params.yaml:train.epochs", "params.yaml:train.lr"]
         );
-    }
-
-    #[test]
-    fn the_filter_wants_every_word_in_the_label_and_ignores_case() {
-        let table = two();
-        let none = BTreeSet::new();
-        let found = table.columns_for(&query(Scope::All, true, "TRAIN lr", &none));
-        assert_eq!(titles(&found), ["name", "params.yaml:train.lr"]);
-        let nothing = table.columns_for(&query(Scope::All, true, "train auc", &none));
-        assert_eq!(titles(&nothing), ["name"]);
     }
 
     #[test]
@@ -1560,6 +1538,18 @@ mod tests {
         assert_eq!(bare.ordered(&Sort::default()).len(), 2);
     }
 
+    #[test]
+    fn a_folded_series_can_be_hidden_as_one_column() {
+        let table = folds_table();
+        let hidden: BTreeSet<String> = ["m.json:by_fold.*.rmse".to_owned()].into();
+        let mut q = query(Scope::Metrics, true, "", &hidden);
+        q.fold = true;
+        assert_eq!(
+            table.columns_for(&q),
+            [Column::Name, Column::Metric("m.json:loss".into())]
+        );
+    }
+
     fn folds_table() -> Table {
         let json = r#"[
           {"rev": "workspace", "name": null, "data": {"timestamp": null, "params": {},
@@ -1603,17 +1593,16 @@ mod tests {
     }
 
     #[test]
-    fn pinned_columns_come_first_and_ignore_scope_and_filter() {
+    fn pinned_columns_come_first_and_ignore_the_scope() {
         let table = two();
         let none = BTreeSet::new();
         let pinned: BTreeSet<String> = ["params.yaml:train.lr".to_owned()].into();
-        let mut q = query(Scope::Metrics, true, "auc", &none);
+        let mut q = query(Scope::Metrics, true, "", &none);
         q.pinned = &pinned;
         let columns = table.columns_for(&q);
         assert_eq!(columns[0], Column::Name);
         assert_eq!(columns[1], Column::Param("params.yaml:train.lr".into()));
         assert!(columns.contains(&Column::Metric("metrics.json:auc".into())));
-        assert!(!columns.contains(&Column::Metric("metrics.json:loss".into())));
         // Hiding wins over pinning.
         let hidden: BTreeSet<String> = ["params.yaml:train.lr".to_owned()].into();
         let mut q = query(Scope::Metrics, true, "", &hidden);

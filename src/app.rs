@@ -248,7 +248,6 @@ pub struct ExperimentsView {
     /// Also show the columns that hold the same value in every row (`u`).
     pub show_unchanged: bool,
     /// Only columns whose label contains all these words are shown (`/`).
-    pub filter: String,
     /// The rows marked with `Space` or `,` (by commit id, so they survive sorting and reloads).
     pub selected: BTreeSet<String>,
     /// The commit id of the experiment shown on its own (`Enter`).
@@ -280,7 +279,6 @@ impl ExperimentsView {
             scope: self.scope,
             hidden: &self.hidden,
             show_unchanged: self.show_unchanged,
-            filter: &self.filter,
             pinned: &self.pinned,
             fold,
         })
@@ -686,7 +684,6 @@ impl App {
         let view = &self.experiments;
         SavedView {
             scope: view.scope.label().to_lowercase(),
-            filter: view.filter.clone(),
             show_unchanged: view.show_unchanged,
             unfolded: view.unfolded,
             deltas: view.deltas,
@@ -709,7 +706,6 @@ impl App {
         {
             view.scope = *scope;
         }
-        view.filter.clone_from(&saved.filter);
         view.show_unchanged = saved.show_unchanged;
         view.unfolded = saved.unfolded;
         view.deltas = saved.deltas;
@@ -1613,9 +1609,6 @@ impl App {
                 self.experiments.show_unchanged = !self.experiments.show_unchanged;
                 self.experiments.columns_changed();
             }
-            KeyCode::Char('/') => {
-                self.prompt = Some(Prompt::filter(&self.experiments.filter));
-            }
             KeyCode::Char('{') => self.jump_group(false),
             KeyCode::Char('}') => self.jump_group(true),
             KeyCode::Char('v') => self.open_param_picker(),
@@ -1672,10 +1665,6 @@ impl App {
             }
             KeyCode::Esc if !self.experiments.selected.is_empty() => {
                 self.experiments.selected.clear();
-            }
-            KeyCode::Esc if !self.experiments.filter.is_empty() => {
-                self.experiments.filter.clear();
-                self.experiments.columns_changed();
             }
             KeyCode::Esc => self.view = View::Pipeline,
             _ => {}
@@ -1738,7 +1727,11 @@ impl App {
             return;
         };
         match self.experiments.columns(table).get(self.experiments.column) {
-            Some(experiments::Column::Param(label) | experiments::Column::Metric(label)) => {
+            Some(
+                experiments::Column::Param(label)
+                | experiments::Column::Metric(label)
+                | experiments::Column::Spread(label),
+            ) => {
                 let label = label.clone();
                 self.experiments.hidden.insert(label);
                 self.notice = Some("column hidden; + shows the hidden columns again".to_owned());
@@ -1993,9 +1986,6 @@ impl App {
                 self.experiments.show_unchanged = !self.experiments.show_unchanged;
                 self.experiments.focus_scroll = 0;
             }
-            KeyCode::Char('/') => {
-                self.prompt = Some(Prompt::filter(&self.experiments.filter));
-            }
             _ => {}
         }
         Vec::new()
@@ -2096,9 +2086,6 @@ impl App {
             KeyCode::Char('u') => {
                 self.experiments.show_unchanged = !self.experiments.show_unchanged;
                 self.experiments.focus_scroll = 0;
-            }
-            KeyCode::Char('/') => {
-                self.prompt = Some(Prompt::filter(&self.experiments.filter));
             }
             _ => {}
         }
@@ -2343,12 +2330,6 @@ impl App {
                 Vec::new()
             }
             PromptAction::Submit(text) => {
-                if prompt.kind == PromptKind::Filter {
-                    self.prompt = None;
-                    self.experiments.filter = text;
-                    self.experiments.columns_changed();
-                    return Vec::new();
-                }
                 if let PromptKind::Best { label } = prompt.kind.clone() {
                     self.prompt = None;
                     let count = text.parse().unwrap_or(1);
@@ -3981,22 +3962,10 @@ mod experiments_view_tests {
     }
 
     #[test]
-    fn slash_filters_the_columns_and_esc_drops_the_filter_before_leaving() {
+    fn esc_in_the_experiments_table_leaves_the_view() {
         let mut h = serving_two();
         h.press(KeyCode::Char('e'));
         h.wait_for_data();
-        h.press(KeyCode::Char('/'));
-        assert!(h.app.prompt.is_some());
-        type_text(&mut h, "lr");
-        h.press(KeyCode::Enter);
-        assert!(h.app.prompt.is_none());
-        assert_eq!(h.app.experiments.filter, "lr");
-        assert_eq!(column_titles(&h), ["name", "params.yaml:train.lr"]);
-
-        h.press(KeyCode::Esc);
-        assert!(h.app.experiments.filter.is_empty());
-        assert_eq!(h.app.view, View::Experiments, "the first Esc only clears");
-        assert_eq!(column_titles(&h).len(), 6);
         h.press(KeyCode::Esc);
         assert_eq!(h.app.view, View::Pipeline);
     }

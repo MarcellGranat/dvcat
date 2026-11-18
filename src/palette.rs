@@ -176,7 +176,6 @@ pub const ENTRIES: &[Entry] = &[
         KeyCode::Tab,
         "params / metrics / all columns",
     ),
-    key(Experiments, "/", '/', "filter the columns by words"),
     key(Experiments, "u", 'u', "show or hide the unchanged columns"),
     key(Experiments, "{ }", '}', "jump to the next column group"),
     key(
