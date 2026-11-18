@@ -1643,6 +1643,19 @@ impl App {
                 );
                 self.experiments.columns_changed();
             }
+            KeyCode::Char('i') => {
+                let sort = &mut self.experiments.sort;
+                sort.show_empty = !sort.show_empty;
+                self.notice = Some(
+                    if sort.show_empty {
+                        "commits without experiments shown (i hides them)"
+                    } else {
+                        "commits without experiments hidden (i shows them)"
+                    }
+                    .to_owned(),
+                );
+                self.clamp_experiments_cursor();
+            }
             KeyCode::Char('T') => self.open_best_prompt(),
             KeyCode::Char('B') => self.cycle_direction(),
             KeyCode::Char('n') => self.open_experiment_form(),

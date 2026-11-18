@@ -191,6 +191,12 @@ pub const ENTRIES: &[Entry] = &[
         'F',
         "fold or unfold the by_fold metrics into one mean ±spread column",
     ),
+    key(
+        Experiments,
+        "i",
+        'i',
+        "show or hide the commits no experiment ran on",
+    ),
     key(Experiments, "-", '-', "hide the cursor's column"),
     key(Experiments, "+", '+', "show the hidden columns again"),
     key(Experiments, "v", 'v', "choose the param columns"),

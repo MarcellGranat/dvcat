@@ -548,7 +548,7 @@ impl Table {
 
     /// Rows in display order. Only experiments are reordered, and only within the run of
     /// experiments that belongs to one baseline; the workspace and baselines stay put.
-    pub fn ordered(&self, sort: &Sort) -> Vec<&Row> {
+    pub fn ordered<'a>(&'a self, sort: &Sort) -> Vec<&'a Row> {
         let shown = |row: &Row| {
             row.kind != RowKind::Experiment
                 || sort
@@ -558,17 +558,33 @@ impl Table {
         };
         let mut out: Vec<&Row> = Vec::with_capacity(self.rows.len());
         let mut run: Vec<&Row> = Vec::new();
+        // A commit is listed with its experiments; one without any (shown) is left out.
+        let mut held: Option<&Row> = None;
+        // Without any experiment the commits are all there is; a broken commit must stay visible.
+        let keep_empty = |commit: &Row| !self.has_experiments() || commit.error.is_some();
+        let place = |held: &mut Option<&'a Row>, run: &mut Vec<&'a Row>, out: &mut Vec<&'a Row>| {
+            if let Some(commit) = held.take()
+                && (!run.is_empty() || sort.show_empty || keep_empty(commit))
+            {
+                out.push(commit);
+            }
+            flush_run(run, out, sort.by.as_ref());
+        };
         for row in &self.rows {
             if row.kind == RowKind::Experiment {
                 if shown(row) {
                     run.push(row);
                 }
             } else {
-                flush_run(&mut run, &mut out, sort.by.as_ref());
-                out.push(row);
+                place(&mut held, &mut run, &mut out);
+                if row.kind == RowKind::Baseline {
+                    held = Some(row);
+                } else {
+                    out.push(row);
+                }
             }
         }
-        flush_run(&mut run, &mut out, sort.by.as_ref());
+        place(&mut held, &mut run, &mut out);
         out
     }
 
@@ -1086,6 +1102,8 @@ pub struct Sort {
     /// When set, only the experiments with these commit ids are shown (the workspace and the
     /// baselines always are: experiments are compared with them).
     pub only: Option<BTreeSet<String>>,
+    /// Keep the commits no experiment ran on (hidden unless set).
+    pub show_empty: bool,
 }
 
 impl Sort {
@@ -1510,6 +1528,36 @@ mod tests {
         assert_eq!(display_rounded(&Value::from(2.0)), "2.0");
         assert_eq!(display_rounded(&Value::from(7)), "7");
         assert_eq!(display_rounded(&Value::from("0.123456789")), "0.123456789");
+    }
+
+    #[test]
+    fn commits_without_experiments_are_left_out_unless_asked_for() {
+        let json = r#"[
+          {"rev": "workspace", "name": null, "data": {"timestamp": null, "params": {}, "metrics": {}}},
+          {"rev": "aaaaaaa1", "name": "main", "data": {"timestamp": null, "params": {}, "metrics": {}}},
+          {"rev": "bbbbbbb2", "name": null, "data": {"timestamp": null, "params": {}, "metrics": {}},
+           "experiments": [{"revs": [{"rev": "ccccccc3", "name": "exp-1",
+             "data": {"timestamp": null, "params": {}, "metrics": {}}}]}]},
+          {"rev": "ddddddd4", "name": null, "data": {"timestamp": null, "params": {}, "metrics": {}}}
+        ]"#;
+        let table = parse(json).unwrap();
+        let labels = |sort: &Sort| -> Vec<String> {
+            table
+                .ordered(sort)
+                .iter()
+                .map(|r| r.label.clone())
+                .collect()
+        };
+        assert_eq!(labels(&Sort::default()), ["workspace", "bbbbbbb", "exp-1"]);
+        let all = Sort {
+            show_empty: true,
+            ..Sort::default()
+        };
+        assert_eq!(labels(&all).len(), 5);
+        // With no experiment at all the commits are what there is to see.
+        let cut = json.find(",\n          {\"rev\": \"bbbbbbb2\"").unwrap();
+        let bare = parse(&format!("{}]", &json[..cut])).unwrap();
+        assert_eq!(bare.ordered(&Sort::default()).len(), 2);
     }
 
     fn folds_table() -> Table {
