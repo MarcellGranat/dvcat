@@ -130,7 +130,6 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
     ("j/k", "scroll"),
     ("h/l", "other row"),
     ("Tab", "params/metrics"),
-    ("/", "filter"),
     ("u", "unchanged"),
     ("Esc", "back"),
 ];
@@ -138,7 +137,6 @@ const COMPARE_KEYS: &[(&str, &str)] = &[
     ("j/k", "scroll"),
     ("x", "swap"),
     ("Tab", "params/metrics"),
-    ("/", "filter"),
     ("u", "unchanged"),
     ("Esc", "back"),
 ];
@@ -147,7 +145,6 @@ const EXPERIMENTS_KEYS: &[(&str, &str)] = &[
     ("h/l", "column"),
     ("s", "sort"),
     ("Tab", "params/metrics"),
-    ("/", "filter"),
     ("u", "unchanged"),
     ("{ }", "group"),
     ("Enter", "focus"),
